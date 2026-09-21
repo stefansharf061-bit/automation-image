@@ -1,0 +1,50 @@
+{
+  "pencil": {
+    "style": "pencil",
+    "file": "/assets/hand_pencil.png",
+    "width": 1024,
+    "height": 1024,
+    "bbox": {
+      "minX": 149,
+      "minY": 87,
+      "maxX": 1023,
+      "maxY": 868
+    },
+    "tip": {
+      "x": 149,
+      "y": 866
+    }
+  },
+  "charcoal": {
+    "style": "charcoal",
+    "file": "/assets/hand_charcoal.png",
+    "width": 1024,
+    "height": 1024,
+    "bbox": {
+      "minX": 313,
+      "minY": 0,
+      "maxX": 1023,
+      "maxY": 896
+    },
+    "tip": {
+      "x": 314,
+      "y": 571
+    }
+  },
+  "fineliner": {
+    "style": "fineliner",
+    "file": "/assets/hand_fineliner.png",
+    "width": 1024,
+    "height": 1024,
+    "bbox": {
+      "minX": 306,
+      "minY": 160,
+      "maxX": 801,
+      "maxY": 1023
+    },
+    "tip": {
+      "x": 342,
+      "y": 748
+    }
+  }
+}

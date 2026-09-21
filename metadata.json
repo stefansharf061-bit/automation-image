@@ -1,0 +1,6 @@
+{
+  "name": "ArtBoard Hand-Drawn Animator",
+  "description": "Transform uploaded photos into a realistic 60-second animation of a human hand drawing on a physical art board.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
