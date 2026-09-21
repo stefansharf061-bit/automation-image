@@ -1,10 +1,10 @@
 import React, { useState, useRef } from 'react';
 import { DrawingData, DrawingStyle } from '../types';
 import { loadImage, processImageToDrawing } from '../lib/imageProcessor';
-import { Upload, Image as ImageIcon, Sparkles, Wand2, Check } from 'lucide-react';
+import { Upload, Image as ImageIcon, Sparkles, Wand2, Check, Layers } from 'lucide-react';
 
 interface SetupPanelProps {
-  onGenerateComplete: (data: DrawingData, style: DrawingStyle) => void;
+  onGenerateComplete: (data: DrawingData, style: DrawingStyle, initialDebug?: boolean) => void;
 }
 
 export const SetupPanel: React.FC<SetupPanelProps> = ({ onGenerateComplete }) => {
@@ -62,7 +62,7 @@ export const SetupPanel: React.FC<SetupPanelProps> = ({ onGenerateComplete }) =>
   };
 
   // Process and Generate
-  const handleGenerate = async () => {
+  const handleGenerate = async (debug = false) => {
     if (!selectedImage) {
       setError('Please upload a photo or click "Load Sample Portrait" first.');
       return;
@@ -87,7 +87,7 @@ export const SetupPanel: React.FC<SetupPanelProps> = ({ onGenerateComplete }) =>
       setProcessStep('Preparing physical art board scene...');
       await new Promise(r => setTimeout(r, 100));
 
-      onGenerateComplete(drawingData, style);
+      onGenerateComplete(drawingData, style, debug);
     } catch (err: unknown) {
       console.error(err);
       setError((err as Error)?.message || 'Failed to process image');
@@ -276,21 +276,39 @@ export const SetupPanel: React.FC<SetupPanelProps> = ({ onGenerateComplete }) =>
           </div>
         )}
 
-        {/* Action Button */}
-        <button
-          id="generate-animation-btn"
-          type="button"
-          disabled={!selectedImage || isProcessing}
-          onClick={handleGenerate}
-          className={`w-full py-3.5 px-4 rounded-xl font-medium text-sm flex items-center justify-center gap-2 transition-all cursor-pointer ${
-            !selectedImage || isProcessing
-              ? 'bg-stone-800 text-stone-500 cursor-not-allowed'
-              : 'bg-amber-400 hover:bg-amber-300 text-stone-950 shadow-lg hover:shadow-amber-400/20 active:scale-[0.99]'
-          }`}
-        >
-          <Wand2 className="w-4 h-4" />
-          <span>Generate 60-Second Drawing Animation</span>
-        </button>
+        {/* Action Buttons Row */}
+        <div className="flex flex-col sm:flex-row items-center gap-2.5">
+          <button
+            id="generate-animation-btn"
+            type="button"
+            disabled={!selectedImage || isProcessing}
+            onClick={() => handleGenerate(false)}
+            className={`flex-1 w-full py-3.5 px-4 rounded-xl font-medium text-sm flex items-center justify-center gap-2 transition-all cursor-pointer ${
+              !selectedImage || isProcessing
+                ? 'bg-stone-800 text-stone-500 cursor-not-allowed'
+                : 'bg-amber-400 hover:bg-amber-300 text-stone-950 shadow-lg hover:shadow-amber-400/20 active:scale-[0.99]'
+            }`}
+          >
+            <Wand2 className="w-4 h-4" />
+            <span>Generate 60-Second Drawing Animation</span>
+          </button>
+
+          <button
+            id="verify-paths-debug-btn"
+            type="button"
+            disabled={!selectedImage || isProcessing}
+            onClick={() => handleGenerate(true)}
+            title="Inspect and verify the consolidated paths overlay color-coded per phase before the hand animation plays"
+            className={`w-full sm:w-auto py-3.5 px-4 rounded-xl font-medium text-xs flex items-center justify-center gap-2 border transition-all cursor-pointer ${
+              !selectedImage || isProcessing
+                ? 'bg-stone-800/40 text-stone-600 border-stone-800 cursor-not-allowed'
+                : 'bg-stone-900/90 hover:bg-stone-800 text-amber-300 border-amber-500/40 hover:border-amber-400 active:scale-[0.99] shadow-md'
+            }`}
+          >
+            <Layers className="w-4 h-4 text-amber-400" />
+            <span>Verify Paths (Debug)</span>
+          </button>
+        </div>
 
         {/* Subtle note about screen recording */}
         <p className="text-[11px] text-center text-stone-500 mt-3">

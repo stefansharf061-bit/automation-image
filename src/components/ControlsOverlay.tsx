@@ -1,6 +1,6 @@
 import React from 'react';
 import { TimelineState } from '../lib/animationController';
-import { Play, Pause, RotateCcw, Maximize2, Minimize2, Volume2, VolumeX } from 'lucide-react';
+import { Play, Pause, RotateCcw, Maximize2, Minimize2, Volume2, VolumeX, Layers } from 'lucide-react';
 
 interface ControlsOverlayProps {
   timeline: TimelineState;
@@ -8,12 +8,14 @@ interface ControlsOverlayProps {
   hideControls: boolean;
   isMuted: boolean;
   playbackRate: number;
+  showDebugOverlay?: boolean;
   onPlayPause: () => void;
   onRestart: () => void;
   onSeek: (time: number) => void;
   onToggleFullscreen: () => void;
   onToggleMute: () => void;
   onSpeedChange: (rate: number) => void;
+  onToggleDebug?: () => void;
 }
 
 function formatTime(seconds: number): string {
@@ -28,12 +30,14 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({
   hideControls,
   isMuted,
   playbackRate,
+  showDebugOverlay,
   onPlayPause,
   onRestart,
   onSeek,
   onToggleFullscreen,
   onToggleMute,
-  onSpeedChange
+  onSpeedChange,
+  onToggleDebug
 }) => {
   const handleScrubberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = parseFloat(e.target.value);
@@ -134,6 +138,23 @@ export const ControlsOverlay: React.FC<ControlsOverlayProps> = ({
                 </button>
               ))}
             </div>
+
+            {/* Debug Paths Overlay Toggle */}
+            {onToggleDebug && (
+              <button
+                id="controls-debug-overlay-btn"
+                onClick={onToggleDebug}
+                title={showDebugOverlay ? 'Hide Debug Paths Overlay (D)' : 'Show Debug Paths Overlay (D)'}
+                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all border cursor-pointer ${
+                  showDebugOverlay
+                    ? 'bg-amber-400 text-stone-950 font-bold border-amber-300 shadow-md ring-1 ring-amber-400/40'
+                    : 'bg-stone-800 hover:bg-stone-700 text-stone-300 border-stone-700/60'
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Debug</span>
+              </button>
+            )}
 
             {/* Fullscreen Button */}
             <button

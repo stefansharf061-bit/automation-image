@@ -4,16 +4,20 @@ import { animationController, TimelineState } from '../lib/animationController';
 import { soundEngine } from '../lib/soundEngine';
 import { ControlsOverlay } from './ControlsOverlay';
 import { RepresentativeHand } from './RepresentativeHand';
+import { DebugPathsOverlay } from './DebugPathsOverlay';
+import { Layers } from 'lucide-react';
 
 interface ArtBoardSceneProps {
   drawingData: DrawingData;
   style: DrawingStyle;
+  initialDebug?: boolean;
   onBackToSetup: () => void;
 }
 
 export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
   drawingData,
   style,
+  initialDebug = false,
   onBackToSetup
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -42,6 +46,7 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
   const [isMuted, setIsMuted] = useState<boolean>(soundEngine.getMuted());
   const [playbackRate, setPlaybackRate] = useState<number>(1.0);
   const [hideControlsInFullscreen, setHideControlsInFullscreen] = useState<boolean>(false);
+  const [showDebugOverlay, setShowDebugOverlay] = useState<boolean>(initialDebug);
   const hideTimerRef = useRef<number | null>(null);
 
   // Resize observer to track exact paper sheet display dimensions
@@ -75,16 +80,19 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
     });
     animationController.loadDrawing(drawingData, style);
 
-    // Auto-play after 450ms for immediate lifelike cinematic start
-    const timer = setTimeout(() => {
-      animationController.play();
-    }, 450);
+    // Auto-play after 450ms for immediate start, unless in initial debug verification mode
+    let timer: NodeJS.Timeout | null = null;
+    if (!initialDebug) {
+      timer = setTimeout(() => {
+        animationController.play();
+      }, 450);
+    }
 
     return () => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       animationController.destroy();
     };
-  }, [drawingData, style]);
+  }, [drawingData, style, initialDebug]);
 
   // Fullscreen change listener
   useEffect(() => {
@@ -101,7 +109,11 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
 
-  // Keyboard shortcuts (Space = play/pause, R = restart, F = fullscreen, M = mute)
+  const toggleDebugOverlay = () => {
+    setShowDebugOverlay((prev) => !prev);
+  };
+
+  // Keyboard shortcuts (Space = play/pause, R = restart, F = fullscreen, M = mute, D = debug)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement) return;
@@ -117,6 +129,9 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
       } else if (e.code === 'KeyM') {
         e.preventDefault();
         toggleMute();
+      } else if (e.code === 'KeyD') {
+        e.preventDefault();
+        toggleDebugOverlay();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -226,6 +241,21 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
           </div>
 
           <div className="flex items-center gap-2.5">
+            {/* Debug Paths Overlay Toggle */}
+            <button
+              id="toggle-debug-overlay-btn"
+              onClick={toggleDebugOverlay}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono rounded border transition-colors cursor-pointer ${
+                showDebugOverlay
+                  ? 'bg-amber-400 text-stone-950 font-bold border-amber-300 shadow-md ring-1 ring-amber-400/40'
+                  : 'bg-stone-900/70 hover:bg-stone-800 border-stone-700/60 text-stone-300'
+              }`}
+              title="Toggle Consolidated Paths Debug Overlay (D)"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>Paths Debug (D)</span>
+            </button>
+
             {/* Hand Mode Toggle */}
             <button
               id="toggle-hand-mode-btn"
@@ -287,27 +317,40 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
               />
             </div>
 
+            {/* Consolidated Paths Visual Debug Overlay Layer */}
+            <DebugPathsOverlay
+              drawingData={drawingData}
+              isOpen={showDebugOverlay}
+              onClose={() => setShowDebugOverlay(false)}
+              onPlayAnimation={togglePlay}
+              isPlaying={timelineState.isPlaying}
+            />
+
             {/* Overlay Canvas for Photographic Sprite Mode with Unconstrained Overflow */}
             <canvas
               ref={overlayCanvasRef}
               id="overlay-canvas"
-              className="absolute inset-0 block w-full h-full object-contain pointer-events-none z-30"
+              className={`absolute inset-0 block w-full h-full object-contain pointer-events-none z-30 transition-opacity duration-200 ${
+                showDebugOverlay && !timelineState.isPlaying ? 'opacity-0' : 'opacity-100'
+              }`}
               style={{ overflow: 'visible' }}
             />
 
             {/* The Representative Hand Component Layered Over Drawing Surface */}
-            {timelineState.handMode === 'representative' && sheetDimensions.width > 0 && (
-              <RepresentativeHand
-                x={handRenderX}
-                y={handRenderY}
-                isDrawing={timelineState.handPos.isDrawing}
-                lift={timelineState.handPos.lift}
-                angle={timelineState.handPos.angle}
-                style={style}
-                paperWidth={sheetDimensions.width}
-                paperHeight={sheetDimensions.height}
-              />
-            )}
+            {timelineState.handMode === 'representative' &&
+              sheetDimensions.width > 0 &&
+              !(showDebugOverlay && !timelineState.isPlaying) && (
+                <RepresentativeHand
+                  x={handRenderX}
+                  y={handRenderY}
+                  isDrawing={timelineState.handPos.isDrawing}
+                  lift={timelineState.handPos.lift}
+                  angle={timelineState.handPos.angle}
+                  style={style}
+                  paperWidth={sheetDimensions.width}
+                  paperHeight={sheetDimensions.height}
+                />
+              )}
           </div>
         </div>
       </div>
@@ -319,12 +362,14 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
         hideControls={hideControlsInFullscreen}
         isMuted={isMuted}
         playbackRate={playbackRate}
+        showDebugOverlay={showDebugOverlay}
         onPlayPause={togglePlay}
         onRestart={handleRestart}
         onSeek={handleSeek}
         onToggleFullscreen={toggleFullscreen}
         onToggleMute={toggleMute}
         onSpeedChange={handleSpeedChange}
+        onToggleDebug={toggleDebugOverlay}
       />
     </div>
   );
