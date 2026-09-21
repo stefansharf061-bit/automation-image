@@ -3,6 +3,7 @@ import { DrawingData, DrawingStyle } from '../types';
 import { animationController, TimelineState } from '../lib/animationController';
 import { soundEngine } from '../lib/soundEngine';
 import { ControlsOverlay } from './ControlsOverlay';
+import { RepresentativeHand } from './RepresentativeHand';
 
 interface ArtBoardSceneProps {
   drawingData: DrawingData;
@@ -16,8 +17,14 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
   onBackToSetup
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const paperSheetRef = useRef<HTMLDivElement>(null);
   const paperCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  const [sheetDimensions, setSheetDimensions] = useState<{ width: number; height: number }>({
+    width: 0,
+    height: 0
+  });
 
   const [timelineState, setTimelineState] = useState<TimelineState>({
     currentTime: 0,
@@ -27,7 +34,8 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
     currentPhase: 1,
     phaseName: 'Curiosity & Construction Marks',
     progress: 0,
-    handPos: { x: 0, y: 0, isDrawing: false, vx: 0, vy: 0 }
+    handPos: { x: 0, y: 0, isDrawing: false, vx: 0, vy: 0, lift: 1.0, angle: 0 },
+    handMode: 'sprite'
   });
 
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
@@ -35,6 +43,22 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
   const [playbackRate, setPlaybackRate] = useState<number>(1.0);
   const [hideControlsInFullscreen, setHideControlsInFullscreen] = useState<boolean>(false);
   const hideTimerRef = useRef<number | null>(null);
+
+  // Resize observer to track exact paper sheet display dimensions
+  useEffect(() => {
+    if (!paperSheetRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (width > 0 && height > 0) {
+          setSheetDimensions({ width, height });
+        }
+      }
+    });
+
+    observer.observe(paperSheetRef.current);
+    return () => observer.disconnect();
+  }, []);
 
   // Initialize canvases & animation controller
   useEffect(() => {
@@ -51,7 +75,7 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
     });
     animationController.loadDrawing(drawingData, style);
 
-    // Auto-play after 400ms for immediate lifelike cinematic start
+    // Auto-play after 450ms for immediate lifelike cinematic start
     const timer = setTimeout(() => {
       animationController.play();
     }, 450);
@@ -145,6 +169,18 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
     animationController.setPlaybackRate(rate);
   };
 
+  const toggleHandMode = () => {
+    const nextMode = timelineState.handMode === 'representative' ? 'sprite' : 'representative';
+    animationController.setHandMode(nextMode);
+  };
+
+  // Compute scale from internal coordinates to display pixels
+  const scaleX = sheetDimensions.width > 0 ? sheetDimensions.width / drawingData.width : 1;
+  const scaleY = sheetDimensions.height > 0 ? sheetDimensions.height / drawingData.height : 1;
+
+  const handRenderX = timelineState.handPos.x * scaleX;
+  const handRenderY = timelineState.handPos.y * scaleY;
+
   return (
     <div
       ref={containerRef}
@@ -172,7 +208,7 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
       {!isFullscreen && (
         <header
           id="scene-header"
-          className="absolute top-0 left-0 right-0 z-30 flex items-center justify-between px-6 py-4 bg-gradient-to-b from-black/70 via-black/40 to-transparent"
+          className="absolute top-0 left-0 right-0 z-40 flex items-center justify-between px-6 py-4 bg-gradient-to-b from-black/70 via-black/40 to-transparent"
         >
           <div className="flex items-center gap-3">
             <button
@@ -189,7 +225,20 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
             </span>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5">
+            {/* Hand Mode Toggle */}
+            <button
+              id="toggle-hand-mode-btn"
+              onClick={toggleHandMode}
+              className="px-2.5 py-1 text-xs font-mono rounded bg-stone-900/70 hover:bg-stone-800 border border-stone-700/60 text-stone-300 transition-colors cursor-pointer"
+              title="Toggle Hand Renderer"
+            >
+              Hand:{' '}
+              <span className="text-amber-400 font-semibold">
+                {timelineState.handMode === 'representative' ? 'Representative (Vector/CSS)' : 'Photo Sprite'}
+              </span>
+            </button>
+
             <span className="text-xs font-mono px-2.5 py-1 rounded bg-stone-900/60 border border-stone-800 text-stone-400">
               Phase {timelineState.currentPhase}/6: {timelineState.phaseName}
             </span>
@@ -215,29 +264,50 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
           <div className="absolute -bottom-3 left-6 w-12 h-6 bg-amber-100/70 border border-amber-200/40 rotate-[6deg] shadow-md z-30 pointer-events-none rounded-[1px] backdrop-blur-[1px]" />
           <div className="absolute -bottom-3 right-6 w-12 h-6 bg-amber-100/70 border border-amber-200/40 rotate-[-8deg] shadow-md z-30 pointer-events-none rounded-[1px] backdrop-blur-[1px]" />
 
-          {/* Drawing Sheet Area with Realistic Heavy Paper Drop Shadow & Bevel */}
+          {/* Paper Surface Wrapper with Unclipped Layered Hand Container */}
           <div
-            id="paper-sheet"
-            className="relative overflow-hidden rounded-[2px] bg-[#fcf9f2] shadow-[0_12px_32px_rgba(0,0,0,0.45),0_2px_6px_rgba(0,0,0,0.25)] ring-1 ring-stone-300/40"
+            id="paper-surface-wrapper"
+            className="relative"
             style={{
               aspectRatio: `${drawingData.width} / ${drawingData.height}`,
               maxHeight: isFullscreen ? '94vh' : '78vh',
               maxWidth: '92vw'
             }}
           >
-            {/* The Paper Drawing Canvas (Graphite / Charcoal / Ink layer) */}
-            <canvas
-              ref={paperCanvasRef}
-              id="paper-canvas"
-              className="block w-full h-full object-contain"
-            />
+            {/* The Paper Sheet (Graphite Drawing Canvas) */}
+            <div
+              id="paper-sheet"
+              ref={paperSheetRef}
+              className="relative w-full h-full overflow-hidden rounded-[2px] bg-[#fcf9f2] shadow-[0_12px_32px_rgba(0,0,0,0.45),0_2px_6px_rgba(0,0,0,0.25)] ring-1 ring-stone-300/40"
+            >
+              <canvas
+                ref={paperCanvasRef}
+                id="paper-canvas"
+                className="block w-full h-full object-contain"
+              />
+            </div>
 
-            {/* The Overlay Canvas (Moving Hand, Pencil tip, dynamic Contact Shadows) */}
+            {/* Overlay Canvas for Photographic Sprite Mode with Unconstrained Overflow */}
             <canvas
               ref={overlayCanvasRef}
               id="overlay-canvas"
-              className="absolute inset-0 block w-full h-full object-contain pointer-events-none z-20"
+              className="absolute inset-0 block w-full h-full object-contain pointer-events-none z-30"
+              style={{ overflow: 'visible' }}
             />
+
+            {/* The Representative Hand Component Layered Over Drawing Surface */}
+            {timelineState.handMode === 'representative' && sheetDimensions.width > 0 && (
+              <RepresentativeHand
+                x={handRenderX}
+                y={handRenderY}
+                isDrawing={timelineState.handPos.isDrawing}
+                lift={timelineState.handPos.lift}
+                angle={timelineState.handPos.angle}
+                style={style}
+                paperWidth={sheetDimensions.width}
+                paperHeight={sheetDimensions.height}
+              />
+            )}
           </div>
         </div>
       </div>

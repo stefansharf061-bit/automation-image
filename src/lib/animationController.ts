@@ -2,15 +2,168 @@ import { DrawingData, DrawingStroke, DrawingStyle, StrokePoint } from '../types'
 import { handRenderer } from './handRenderer';
 import { soundEngine } from './soundEngine';
 
+/**
+ * Minimum-Jerk trajectory polynomial (Flash & Hogan 1985)
+ * Replicates biological human motor control:
+ * Produces zero velocity and zero acceleration at endpoints with a natural bell-shaped velocity curve.
+ */
+export function easeMinimumJerk(t: number): number {
+  const u = Math.max(0, Math.min(1, t));
+  return u * u * u * (10 + u * (-15 + 6 * u)); // 10u^3 - 15u^4 + 6u^5
+}
+
+/**
+ * Standard cubic ease-in-out
+ */
+export function easeInOutCubic(t: number): number {
+  const u = Math.max(0, Math.min(1, t));
+  return u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+}
+
+/**
+ * Cubic ease-out for natural deceleration
+ */
+export function easeOutCubic(t: number): number {
+  const u = Math.max(0, Math.min(1, t));
+  return 1 - Math.pow(1 - u, 3);
+}
+
+/**
+ * Cubic ease-in for natural acceleration
+ */
+export function easeInCubic(t: number): number {
+  const u = Math.max(0, Math.min(1, t));
+  return u * u * u;
+}
+
+/**
+ * Specialized human drawing stroke easing:
+ * Accelerates smoothly into the mark, maintains fluid cruising momentum,
+ * and decelerates gently to a controlled stop before lifting.
+ */
+export function easeHumanDrawingStroke(t: number): number {
+  const u = Math.max(0, Math.min(1, t));
+  // 5th-order minimum jerk with slight asymmetric acceleration bias
+  const mj = u * u * u * (10 + u * (-15 + 6 * u));
+  const smooth = u * u * (3 - 2 * u);
+  return mj * 0.75 + smooth * 0.25;
+}
+
+export interface PathComplexityData {
+  cumulativeTimeWeights: number[];
+  totalTimeWeight: number;
+  tortuosity: number;
+  averageCurvature: number;
+  complexityFactor: number;
+}
+
+/**
+ * Compute the path complexity profile for a stroke based on local curvature, heading changes,
+ * and tortuosity. Uses the biomechanical 2/3 power law: drawing speed slows down on tight curves
+ * and intricate turns, and accelerates along straight or gentle arcs.
+ */
+export function computeStrokeComplexity(stroke: DrawingStroke): PathComplexityData {
+  const pts = stroke.points;
+  if (pts.length < 2) {
+    return {
+      cumulativeTimeWeights: [0],
+      totalTimeWeight: 1,
+      tortuosity: 1,
+      averageCurvature: 0,
+      complexityFactor: 1
+    };
+  }
+
+  const cumulativeTimeWeights: number[] = [0];
+  let totalAngularChange = 0;
+  let totalArcLength = 0;
+
+  for (let i = 0; i < pts.length - 1; i++) {
+    const pPrev = pts[Math.max(0, i - 1)];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const pNext = pts[Math.min(pts.length - 1, i + 2)];
+
+    const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    totalArcLength += segLen;
+
+    // Angle of current segment
+    const curAngle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+
+    // Heading change from previous segment
+    let dAngle = 0;
+    if (i > 0) {
+      const prevAngle = Math.atan2(p1.y - pPrev.y, p1.x - pPrev.x);
+      let diff = Math.abs(curAngle - prevAngle);
+      while (diff > Math.PI) diff = Math.abs(diff - 2 * Math.PI);
+      dAngle = diff;
+      totalAngularChange += dAngle;
+    }
+
+    // Lookahead angular change (anticipating upcoming corners)
+    if (i < pts.length - 2) {
+      const nextAngle = Math.atan2(pNext.y - p2.y, pNext.x - p2.x);
+      let nextDiff = Math.abs(nextAngle - curAngle);
+      while (nextDiff > Math.PI) nextDiff = Math.abs(nextDiff - 2 * Math.PI);
+      dAngle = Math.max(dAngle, nextDiff * 0.65);
+    }
+
+    // Local curvature (radians per pixel)
+    const localCurvature = dAngle / Math.max(1, segLen);
+
+    // Biomechanical time weighting:
+    // Tight curves and sharp turns demand more time per pixel from human motor control.
+    // Straightaways and gentle sweeps have low complexity weight -> drawn faster.
+    const curvaturePenalty = 1.0 + 2.8 * Math.min(1.8, dAngle) + 1.2 * Math.min(2.0, localCurvature * 18);
+    const segmentTimeWeight = Math.max(0.1, segLen * curvaturePenalty);
+
+    cumulativeTimeWeights.push(cumulativeTimeWeights[cumulativeTimeWeights.length - 1] + segmentTimeWeight);
+  }
+
+  const totalTimeWeight = Math.max(0.001, cumulativeTimeWeights[cumulativeTimeWeights.length - 1]);
+  const chordDist = Math.hypot(pts[pts.length - 1].x - pts[0].x, pts[pts.length - 1].y - pts[0].y);
+  const tortuosity = totalArcLength / Math.max(1, chordDist);
+  const averageCurvature = totalAngularChange / Math.max(1, totalArcLength);
+
+  // Overall stroke complexity factor scales the stroke's scheduled drawing duration
+  const complexityFactor = 1.0 + Math.min(1.5, (tortuosity - 1) * 0.4 + averageCurvature * 28);
+
+  return {
+    cumulativeTimeWeights,
+    totalTimeWeight,
+    tortuosity,
+    averageCurvature,
+    complexityFactor
+  };
+}
+
 export interface TimelineState {
-  currentTime: number; // in seconds
+  currentTime: number; // in seconds (0 to 60)
   totalDuration: number;
   isPlaying: boolean;
   isFinished: boolean;
   currentPhase: number;
   phaseName: string;
   progress: number; // 0 to 1
-  handPos: { x: number; y: number; isDrawing: boolean; vx: number; vy: number };
+  handPos: {
+    x: number;
+    y: number;
+    isDrawing: boolean;
+    vx: number;
+    vy: number;
+    lift: number;
+    angle: number;
+  };
+  handMode: 'representative' | 'sprite';
+}
+
+interface ScheduledStroke {
+  stroke: DrawingStroke;
+  phase: number;
+  startTime: number;
+  drawDuration: number;
+  endTime: number;
+  pauseAfter: number;
 }
 
 export class AnimationController {
@@ -20,66 +173,82 @@ export class AnimationController {
   private overlayCanvas: HTMLCanvasElement | null = null;
   private overlayCtx: CanvasRenderingContext2D | null = null;
 
-  private totalDuration: number = 60.0; // 60 seconds
+  private totalDuration: number = 60.0;
   private currentTime: number = 0;
   private isPlaying: boolean = false;
   private playbackRate: number = 1.0;
   private animFrameId: number | null = null;
   private lastTimestamp: number = 0;
 
-  // Render state cache
-  private strokeProgress: number[] = []; // progress per stroke (0 to 1)
-  private currentStrokeIdx: number = 0;
-  private currentPointIdx: number = 0;
+  // Scheduled timeline
+  private scheduledStrokes: ScheduledStroke[] = [];
+  private strokeDrawnProgress: number[] = [];
+  private strokeComplexityMap: Map<DrawingStroke, PathComplexityData> = new Map();
+
+  // Real-time hand state
   private handX: number = 0;
   private handY: number = 0;
   private handVx: number = 0;
   private handVy: number = 0;
+  private handLift: number = 1.0; // 0 = paper contact, 1 = lifted
+  private handAngle: number = 0;
   private isHandDrawing: boolean = false;
   private style: DrawingStyle = 'pencil';
+  private handMode: 'representative' | 'sprite' = 'sprite';
 
   private onStateChange: ((state: TimelineState) => void) | null = null;
 
-  // Timeline phase boundaries (in seconds)
-  // Phase 1: 0 - 5.0s (Curiosity / Construction)
-  // Phase 2: 5.0 - 20.0s (Major Outlines)
-  // Phase 3: 20.0 - 40.0s (Details & Features)
-  // Phase 4: 40.0 - 53.0s (Shading & Hatching)
-  // Phase 5: 53.0 - 58.0s (Accents & Deep Contrast)
-  // Phase 6: 58.0 - 60.0s (Signature & Reveal)
-  private readonly phaseTimes = [
-    { phase: 1, start: 0, end: 5.0, name: 'Curiosity & Construction Marks' },
-    { phase: 2, start: 5.0, end: 20.0, name: 'Major Outlines & Silhouette' },
-    { phase: 3, start: 20.0, end: 40.0, name: 'Facial Features & Form' },
-    { phase: 4, start: 40.0, end: 53.0, name: 'Artistic Shading & Hatching' },
-    { phase: 5, start: 53.0, end: 58.0, name: 'Deep Accents & Contrast' },
-    { phase: 6, start: 58.0, end: 60.0, name: 'Final Signature & Reveal' }
+  // Strict 6-phase timeline boundaries (sum = 60.0s)
+  private readonly phaseWindows = [
+    { phase: 1, name: 'Curiosity & Construction Marks', start: 0.0, end: 5.0 },
+    { phase: 2, name: 'Major Outlines & Proportions', start: 5.0, end: 20.0 },
+    { phase: 3, name: 'Features, Contour & Anatomy', start: 20.0, end: 40.0 },
+    { phase: 4, name: 'Tonal Shading & Hatching', start: 40.0, end: 53.0 },
+    { phase: 5, name: 'Deep Contrast & Accents', start: 53.0, end: 58.0 },
+    { phase: 6, name: 'Artist Signature & Final Reveal', start: 58.0, end: 60.0 }
   ];
 
-  public setCanvases(paper: HTMLCanvasElement, overlay: HTMLCanvasElement) {
-    this.paperCanvas = paper;
-    this.paperCtx = paper.getContext('2d', { willReadFrequently: true });
-    this.overlayCanvas = overlay;
-    this.overlayCtx = overlay.getContext('2d');
+  public setCanvases(paperCanvas: HTMLCanvasElement, overlayCanvas: HTMLCanvasElement) {
+    this.paperCanvas = paperCanvas;
+    this.paperCtx = paperCanvas.getContext('2d', { willReadFrequently: false });
+    this.overlayCanvas = overlayCanvas;
+    this.overlayCtx = overlayCanvas.getContext('2d');
   }
 
   public setCallback(cb: (state: TimelineState) => void) {
     this.onStateChange = cb;
   }
 
+  public setHandMode(mode: 'representative' | 'sprite') {
+    this.handMode = mode;
+    this.renderOverlay();
+    this.notifyState();
+  }
+
+  public getHandMode(): 'representative' | 'sprite' {
+    return this.handMode;
+  }
+
   public loadDrawing(data: DrawingData, style: DrawingStyle) {
     this.drawingData = data;
     this.style = style;
-    soundEngine.setStyle(style);
     this.currentTime = 0;
-    this.isPlaying = false;
-    this.strokeProgress = new Array(data.strokes.length).fill(0);
-    this.currentStrokeIdx = 0;
-    this.currentPointIdx = 0;
+    this.strokeDrawnProgress = new Array(data.strokes.length).fill(0);
 
-    // Start hand off-screen to the right
-    this.handX = data.width * 1.3;
-    this.handY = data.height * 0.4;
+    // Precompute path complexity profiles for every stroke
+    this.strokeComplexityMap.clear();
+    for (const s of data.strokes) {
+      this.strokeComplexityMap.set(s, computeStrokeComplexity(s));
+    }
+
+    // Build the master time schedule with variable timing based on path complexity
+    this.buildTimeSchedule(data);
+
+    // Initial hand position off-screen bottom-right ready to enter
+    this.handX = data.width * 1.35;
+    this.handY = data.height * 0.95;
+    this.handLift = 1.0;
+    this.handAngle = 0;
     this.isHandDrawing = false;
 
     this.clearPaper();
@@ -87,36 +256,114 @@ export class AnimationController {
     this.notifyState();
   }
 
+  /**
+   * Precompute an exact, non-linear human drawing schedule for every stroke.
+   * Replaces constant-speed drawing with variable timing based on path complexity,
+   * tortuosity, and ensures deliberate biological pauses between marks.
+   */
+  private buildTimeSchedule(data: DrawingData) {
+    this.scheduledStrokes = [];
+    const strokes = data.strokes;
+
+    for (const pw of this.phaseWindows) {
+      const phaseStrokes = strokes.filter(s => s.phase === pw.phase);
+      if (phaseStrokes.length === 0) continue;
+
+      // Intro padding for Phase 1 (hand glides in from off-screen)
+      const phaseIntro = pw.phase === 1 ? 1.0 : 0.0;
+      // Outro padding for Phase 6 (signature finishes, hand retreats)
+      const phaseOutro = pw.phase === 6 ? 0.8 : 0.0;
+
+      const availableTime = Math.max(0.5, (pw.end - pw.start) - phaseIntro - phaseOutro);
+
+      // Compute raw human duration for each stroke in this phase based on path complexity
+      const rawDurations: number[] = [];
+      const rawPauses: number[] = [];
+
+      for (let i = 0; i < phaseStrokes.length; i++) {
+        const s = phaseStrokes[i];
+        const complexity = this.strokeComplexityMap.get(s) || computeStrokeComplexity(s);
+
+        let baseDur = 0.8;
+        if (s.isHatching) {
+          // Shading sweeps: rhythmic oscillating motions
+          baseDur = Math.max(0.65, Math.min(1.7, 0.55 + s.length * 0.0032));
+        } else if (s.length < 80) {
+          // Quick detail strokes
+          baseDur = Math.max(0.38, Math.min(0.85, 0.32 + s.length * 0.0038));
+        } else if (s.length < 240) {
+          // Medium contour line
+          baseDur = Math.max(0.75, Math.min(1.65, 0.65 + s.length * 0.0032));
+        } else {
+          // Long architectural or silhouette mark
+          baseDur = Math.max(1.2, Math.min(2.7, 1.0 + s.length * 0.0026));
+        }
+
+        // Variable timing: scale duration by path complexity factor (tortuosity + local curvature)
+        const dur = baseDur * complexity.complexityFactor;
+        rawDurations.push(dur);
+
+        // Deliberate repositioning pause between strokes:
+        // Gives the hand dedicated time to pause, lift, transit in an arc, and hover before touchdown
+        if (i < phaseStrokes.length - 1) {
+          const nextS = phaseStrokes[i + 1];
+          const lastPt = s.points[s.points.length - 1];
+          const nextFirstPt = nextS.points[0];
+          const jumpDist = Math.hypot(nextFirstPt.x - lastPt.x, nextFirstPt.y - lastPt.y);
+          // Pause scales with distance to travel with guaranteed minimum of 0.20s
+          const pause = Math.max(0.20, Math.min(0.48, 0.18 + jumpDist * 0.0009));
+          rawPauses.push(pause);
+        } else {
+          rawPauses.push(0.18);
+        }
+      }
+
+      const totalRaw = rawDurations.reduce((a, b) => a + b, 0) + rawPauses.reduce((a, b) => a + b, 0);
+      const timeScale = availableTime / Math.max(0.1, totalRaw);
+
+      let curTime = pw.start + phaseIntro;
+      for (let i = 0; i < phaseStrokes.length; i++) {
+        const s = phaseStrokes[i];
+        const scaledDur = rawDurations[i] * timeScale;
+        const scaledPause = rawPauses[i] * timeScale;
+
+        this.scheduledStrokes.push({
+          stroke: s,
+          phase: pw.phase,
+          startTime: curTime,
+          drawDuration: scaledDur,
+          endTime: curTime + scaledDur,
+          pauseAfter: scaledPause
+        });
+
+        curTime += scaledDur + scaledPause;
+      }
+    }
+  }
+
   public clearPaper() {
-    if (!this.paperCtx || !this.paperCanvas || !this.drawingData) return;
+    if (!this.paperCtx || !this.paperCanvas) return;
+    const ctx = this.paperCtx;
     const w = this.paperCanvas.width;
     const h = this.paperCanvas.height;
 
-    // Draw pristine textured drawing paper base
-    this.paperCtx.save();
-    this.paperCtx.fillStyle = '#fcf9f2'; // Fine cold-press cotton rag paper
-    this.paperCtx.fillRect(0, 0, w, h);
+    // Textured cotton drawing paper
+    ctx.fillStyle = '#fdfbf7';
+    ctx.fillRect(0, 0, w, h);
 
-    // Subtle paper grain noise
-    this.paperCtx.fillStyle = 'rgba(0, 0, 0, 0.015)';
-    for (let i = 0; i < 4000; i++) {
-      const rx = Math.random() * w;
-      const ry = Math.random() * h;
-      this.paperCtx.fillRect(rx, ry, 1, 1);
+    // Subtle natural paper grain
+    ctx.save();
+    ctx.fillStyle = 'rgba(130, 120, 105, 0.022)';
+    for (let y = 0; y < h; y += 3) {
+      for (let x = (y % 2) * 2; x < w; x += 4) {
+        ctx.fillRect(x, y, 1, 1);
+      }
     }
-
-    // Subtle directional paper vignette from desk lighting
-    const grad = this.paperCtx.createLinearGradient(0, 0, w, h);
-    grad.addColorStop(0, 'rgba(255, 255, 255, 0.25)');
-    grad.addColorStop(1, 'rgba(40, 30, 20, 0.04)');
-    this.paperCtx.fillStyle = grad;
-    this.paperCtx.fillRect(0, 0, w, h);
-
-    this.paperCtx.restore();
+    ctx.restore();
   }
 
   public play() {
-    if (!this.drawingData) return;
+    if (this.isPlaying) return;
     if (this.currentTime >= this.totalDuration) {
       this.seek(0);
     }
@@ -150,7 +397,6 @@ export class AnimationController {
     if (!this.drawingData) return;
     this.currentTime = Math.max(0, Math.min(this.totalDuration, targetTime));
 
-    // Fast-rebuild paper up to currentTime
     this.clearPaper();
     this.rebuildPaperUpTo(this.currentTime);
     this.updateHandPositionAt(this.currentTime);
@@ -161,7 +407,7 @@ export class AnimationController {
   private loop = (now: number) => {
     if (!this.isPlaying) return;
 
-    const dt = Math.min(0.1, (now - this.lastTimestamp) / 1000) * this.playbackRate;
+    const dt = Math.min(0.08, (now - this.lastTimestamp) / 1000) * this.playbackRate;
     this.lastTimestamp = now;
 
     this.currentTime += dt;
@@ -182,165 +428,273 @@ export class AnimationController {
     this.animFrameId = requestAnimationFrame(this.loop);
   };
 
-  /**
-   * Calculates what portion of each stroke should be drawn at the given time
-   */
   private stepDrawing(dt: number) {
     if (!this.drawingData || !this.paperCtx) return;
 
     const t = this.currentTime;
-    const currentPhaseConfig = this.getCurrentPhaseConfig(t);
-    const pInfo = currentPhaseConfig;
 
-    // Filter strokes belonging to current phase
-    const phaseStrokes = this.drawingData.strokes.filter(s => s.phase === pInfo.phase);
-    const totalPhaseLength = this.drawingData.phaseLengths[pInfo.phase] || 1;
+    // Intro glide: 0.0 to 1.0s hand glides in from bottom-right towards first stroke
+    if (t < 1.0) {
+      soundEngine.stop();
+      this.isHandDrawing = false;
+      this.handLift = 1.0;
 
-    // Fraction through current phase (0 to 1)
-    const phaseProgress = Math.max(0, Math.min(1, (t - pInfo.start) / (pInfo.end - pInfo.start)));
-
-    // Target cumulative distance in this phase
-    const targetDist = phaseProgress * totalPhaseLength;
-
-    // Check special intro and outro periods
-    if (pInfo.phase === 1 && t < 1.4) {
-      // 0 to 1.4s: Opening suspense! Paper is blank, hand enters frame smoothly from top-right
-      const introProgress = t / 1.4;
+      const firstStroke = this.scheduledStrokes[0];
+      const targetPt = firstStroke ? firstStroke.stroke.points[0] : { x: this.drawingData.width * 0.5, y: this.drawingData.height * 0.3 };
       const startX = this.drawingData.width * 1.35;
-      const startY = this.drawingData.height * 0.45;
-      const firstPoint = phaseStrokes[0]?.points[0] || { x: this.drawingData.width * 0.5, y: this.drawingData.height * 0.5 };
+      const startY = this.drawingData.height * 0.95;
 
-      // Ease out cubic
-      const ease = 1 - Math.pow(1 - introProgress, 3);
-      this.handX = startX + (firstPoint.x - startX) * ease;
-      this.handY = startY + (firstPoint.y - startY) * ease;
-      this.handVx = (firstPoint.x - startX) * 0.5;
-      this.handVy = (firstPoint.y - startY) * 0.5;
-      this.isHandDrawing = false;
-      soundEngine.update(false, 0, 0);
+      const u = t / 1.0;
+      // Smooth cubic ease-out
+      const ease = 1 - Math.pow(1 - u, 3);
+
+      this.handX = startX + (targetPt.x - startX) * ease;
+      this.handY = startY + (targetPt.y - startY) * ease;
+      this.handVx = (targetPt.x - startX) * (1 - ease) * 1.2;
+      this.handVy = (targetPt.y - startY) * (1 - ease) * 1.2;
       return;
     }
 
-    if (pInfo.phase === 6 && t > 58.6) {
-      // 58.6 to 60s: Reveal! Artist finishes signature, lifts pencil, hand retreats off-screen
-      const outroProgress = (t - 58.6) / 1.4;
-      const lastStroke = this.drawingData.strokes[this.drawingData.strokes.length - 1];
-      const lastPoint = lastStroke.points[lastStroke.points.length - 1];
-      const exitX = this.drawingData.width * 1.4;
-      const exitY = this.drawingData.height * 0.5;
-
-      const ease = outroProgress * outroProgress;
-      this.handX = lastPoint.x + (exitX - lastPoint.x) * ease;
-      this.handY = lastPoint.y + (exitY - lastPoint.y) * ease;
-      this.handVx = 15;
-      this.handVy = 8;
+    // Outro reveal: 59.2 to 60.0s hand lifts and retreats off-screen
+    if (t >= 59.2) {
+      soundEngine.stop();
       this.isHandDrawing = false;
-      soundEngine.update(false, 0, 0);
+      this.handLift = 1.0;
+
+      const u = (t - 59.2) / 0.8;
+      const ease = u * u;
+
+      const targetX = this.drawingData.width * 1.38;
+      const targetY = this.drawingData.height * 0.92;
+
+      this.handX += (targetX - this.handX) * (ease * 0.3 + 0.08);
+      this.handY += (targetY - this.handY) * (ease * 0.3 + 0.08);
       return;
     }
 
-    // Step through strokes in current phase
-    let accumulatedDist = 0;
-    let activeStroke: DrawingStroke | null = null;
-    let activeStrokeProgress = 0;
+    // Find the currently scheduled stroke or reposition pause at time t
+    let activeSched: ScheduledStroke | null = null;
+    let inPause = false;
+    let pauseFromPt: StrokePoint | null = null;
+    let pauseToPt: StrokePoint | null = null;
+    let pauseProgress = 0;
 
-    for (const stroke of phaseStrokes) {
-      const strokeIdx = this.drawingData.strokes.indexOf(stroke);
-      const strokeStartDist = accumulatedDist;
-      const strokeEndDist = accumulatedDist + stroke.length;
+    for (let i = 0; i < this.scheduledStrokes.length; i++) {
+      const sched = this.scheduledStrokes[i];
+      const strokeIdx = this.drawingData.strokes.indexOf(sched.stroke);
 
-      if (targetDist >= strokeEndDist) {
-        // Fully drawn
-        if (this.strokeProgress[strokeIdx] < 1.0) {
-          this.drawStrokeSegment(stroke, this.strokeProgress[strokeIdx], 1.0);
-          this.strokeProgress[strokeIdx] = 1.0;
-        }
-      } else if (targetDist > strokeStartDist) {
-        // Currently being drawn
-        const prevProg = this.strokeProgress[strokeIdx];
-        const newProg = Math.max(prevProg, (targetDist - strokeStartDist) / stroke.length);
-
-        if (newProg > prevProg) {
-          this.drawStrokeSegment(stroke, prevProg, newProg);
-          this.strokeProgress[strokeIdx] = newProg;
-        }
-
-        activeStroke = stroke;
-        activeStrokeProgress = newProg;
+      if (t >= sched.startTime && t < sched.endTime) {
+        // Actively drawing this stroke
+        activeSched = sched;
         break;
-      } else {
-        // Not reached yet
+      } else if (t >= sched.endTime && t < sched.endTime + sched.pauseAfter) {
+        // In the repositioning pause after this stroke
+        inPause = true;
+        pauseFromPt = sched.stroke.points[sched.stroke.points.length - 1];
+        const nextSched = this.scheduledStrokes[i + 1];
+        pauseToPt = nextSched ? nextSched.stroke.points[0] : pauseFromPt;
+        pauseProgress = (t - sched.endTime) / Math.max(0.001, sched.pauseAfter);
+        // Ensure this stroke is rendered 100%
+        if (this.strokeDrawnProgress[strokeIdx] < 1.0) {
+          this.drawStrokeSegment(sched.stroke, this.strokeDrawnProgress[strokeIdx], 1.0);
+          this.strokeDrawnProgress[strokeIdx] = 1.0;
+        }
         break;
+      } else if (t >= sched.endTime + sched.pauseAfter) {
+        // Stroke is fully completed
+        if (this.strokeDrawnProgress[strokeIdx] < 1.0) {
+          this.drawStrokeSegment(sched.stroke, this.strokeDrawnProgress[strokeIdx], 1.0);
+          this.strokeDrawnProgress[strokeIdx] = 1.0;
+        }
+      }
+    }
+
+    if (activeSched) {
+      const strokeIdx = this.drawingData.strokes.indexOf(activeSched.stroke);
+      const rawProg = Math.max(0, Math.min(1, (t - activeSched.startTime) / Math.max(0.001, activeSched.drawDuration)));
+      // Natural human motor acceleration and deceleration using minimum-jerk profile
+      const easeProg = easeHumanDrawingStroke(rawProg);
+
+      // Draw the new segment on the paper
+      const prevProg = this.strokeDrawnProgress[strokeIdx];
+      if (easeProg > prevProg) {
+        this.drawStrokeSegment(activeSched.stroke, prevProg, easeProg);
+        this.strokeDrawnProgress[strokeIdx] = easeProg;
       }
 
-      accumulatedDist += stroke.length;
-    }
+      // Hand contact position with variable timing governed by path complexity
+      const activePt = this.getStrokePointAtProgress(activeSched.stroke, easeProg);
 
-    // Update hand position to follow the active stroke
-    if (activeStroke) {
-      const ptInfo = this.getStrokePointAtProgress(activeStroke, activeStrokeProgress);
-      this.handVx = (ptInfo.x - this.handX) * 12;
-      this.handVy = (ptInfo.y - this.handY) * 12;
-      this.handX = ptInfo.x;
-      this.handY = ptInfo.y;
+      const dx = activePt.x - this.handX;
+      const dy = activePt.y - this.handY;
+      const speed = Math.hypot(dx, dy) / Math.max(0.001, dt);
+
+      this.handVx = dx / Math.max(0.001, dt);
+      this.handVy = dy / Math.max(0.001, dt);
+      this.handX = activePt.x;
+      this.handY = activePt.y;
+
+      // Contact state: pencil tip is locked on the paper
       this.isHandDrawing = true;
+      this.handLift = 0.0;
 
-      const speed = Math.hypot(this.handVx, this.handVy);
-      soundEngine.update(true, speed, ptInfo.pressure);
-    } else {
-      // Transitioning between strokes: smooth interpolation towards next stroke
+      // Subtle wrist angle response to stroke direction
+      if (Math.hypot(this.handVx, this.handVy) > 12) {
+        const targetAngle = Math.atan2(this.handVy, this.handVx) * 0.06;
+        this.handAngle += (targetAngle - this.handAngle) * 0.14;
+      }
+
+      soundEngine.update(true, speed, activePt.pressure);
+    } else if (inPause && pauseFromPt && pauseToPt) {
+      // Repositioning interval: hand pauses briefly between strokes
       this.isHandDrawing = false;
-      soundEngine.update(false, 0, 0);
+      soundEngine.stop();
+
+      // Divide the inter-stroke pause into three realistic biological sub-phases:
+      // 1. Post-stroke Lift & Deliberation Pause (0.0 to 0.22)
+      //    Hand stays stationary at previous stroke end, pencil lifts up.
+      // 2. Air Transit Flight (0.22 to 0.78)
+      //    Hand glides smoothly in an elevated arc from previous end to upcoming start.
+      // 3. Pre-stroke Hover & Landing Pause (0.78 to 1.0)
+      //    Hand arrives at next stroke start, pauses and hovers, pencil descends to contact paper.
+
+      if (pauseProgress < 0.22) {
+        // Phase 1: Lift-off deliberation pause at previous stroke end
+        const liftProg = pauseProgress / 0.22;
+        this.handLift = easeOutCubic(liftProg);
+        this.handX = pauseFromPt.x;
+        this.handY = pauseFromPt.y;
+        this.handVx = 0;
+        this.handVy = 0;
+      } else if (pauseProgress < 0.78) {
+        // Phase 2: In-flight transit with minimum jerk acceleration & deceleration
+        const transitProg = (pauseProgress - 0.22) / 0.56;
+        const transitEase = easeMinimumJerk(transitProg);
+        const arcHeight = Math.sin(transitProg * Math.PI) * -14;
+
+        const targetX = pauseFromPt.x + (pauseToPt.x - pauseFromPt.x) * transitEase;
+        const targetY = pauseFromPt.y + (pauseToPt.y - pauseFromPt.y) * transitEase + arcHeight;
+
+        this.handVx = (targetX - this.handX) / Math.max(0.001, dt);
+        this.handVy = (targetY - this.handY) / Math.max(0.001, dt);
+        this.handX = targetX;
+        this.handY = targetY;
+        this.handLift = 1.0;
+      } else {
+        // Phase 3: Hover & landing pause poised at upcoming stroke start
+        const landProg = (pauseProgress - 0.78) / 0.22;
+        this.handLift = Math.max(0, 1.0 - easeInOutCubic(landProg));
+        this.handX = pauseToPt.x;
+        this.handY = pauseToPt.y;
+        this.handVx = 0;
+        this.handVy = 0;
+      }
+    } else {
+      this.isHandDrawing = false;
+      this.handLift = 0.8;
+      soundEngine.stop();
     }
   }
 
-  private drawStrokeSegment(stroke: DrawingStroke, fromProgress: number, toProgress: number) {
-    if (!this.paperCtx || stroke.points.length < 2 || fromProgress >= toProgress) return;
+  /**
+   * Helper to map progress (0..1) to vertex index using path complexity weights
+   */
+  private getSegmentIndexAtProgress(stroke: DrawingStroke, prog: number): number {
+    const pts = stroke.points;
+    if (pts.length <= 1 || prog <= 0) return 0;
+    if (prog >= 1.0) return pts.length - 1;
 
+    const comp = this.strokeComplexityMap.get(stroke) || computeStrokeComplexity(stroke);
+    const weights = comp.cumulativeTimeWeights;
+    const targetWeight = prog * comp.totalTimeWeight;
+
+    let low = 0;
+    let high = weights.length - 1;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (weights[mid] < targetWeight) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return Math.max(0, Math.min(pts.length - 1, high));
+  }
+
+  private drawStrokeSegment(stroke: DrawingStroke, fromProg: number, toProg: number) {
+    if (!this.paperCtx || fromProg >= toProg) return;
     const ctx = this.paperCtx;
+    const pts = stroke.points;
+    if (pts.length < 2) return;
+
+    // Use path complexity mapping so canvas rendering matches pencil tip exactly
+    const startIdx = this.getSegmentIndexAtProgress(stroke, fromProg);
+    const endIdx = Math.min(pts.length - 1, this.getSegmentIndexAtProgress(stroke, toProg) + 1);
+
     ctx.save();
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.strokeStyle = stroke.color;
-    ctx.globalAlpha = stroke.alpha;
 
-    const totalPts = stroke.points.length;
-    const startIdx = Math.max(0, Math.floor(fromProgress * (totalPts - 1)));
-    const endIdx = Math.min(totalPts - 1, Math.ceil(toProgress * (totalPts - 1)));
-
-    for (let i = startIdx; i < endIdx; i++) {
-      const p1 = stroke.points[i];
-      const p2 = stroke.points[i + 1];
-      if (!p2) break;
-
-      const pressure = (p1.pressure + p2.pressure) / 2;
-      ctx.lineWidth = Math.max(0.6, stroke.baseWidth * (0.65 + pressure * 0.7));
-
-      // Graphite / charcoal edge texture simulation:
-      // Slight opacity fluctuation
-      const textureJitter = 0.9 + Math.random() * 0.2;
-      ctx.globalAlpha = Math.min(1.0, stroke.alpha * textureJitter);
+    for (let i = Math.max(0, startIdx); i < Math.min(pts.length - 1, endIdx); i++) {
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
 
       ctx.beginPath();
       ctx.moveTo(p1.x, p1.y);
       ctx.lineTo(p2.x, p2.y);
+
+      const pressure = (p1.pressure + p2.pressure) / 2;
+      const width = stroke.baseWidth * (0.65 + pressure * 0.75);
+      ctx.lineWidth = width;
+
+      if (stroke.style === 'pencil') {
+        ctx.strokeStyle = `rgba(38, 36, 33, ${stroke.alpha * (0.55 + pressure * 0.45)})`;
+      } else if (stroke.style === 'charcoal') {
+        ctx.strokeStyle = `rgba(20, 18, 16, ${stroke.alpha * (0.65 + pressure * 0.5)})`;
+      } else {
+        ctx.strokeStyle = `rgba(8, 8, 8, ${stroke.alpha})`;
+      }
+
       ctx.stroke();
     }
 
     ctx.restore();
   }
 
-  private getStrokePointAtProgress(stroke: DrawingStroke, progress: number): StrokePoint {
+  /**
+   * Determine exact pencil contact point on stroke for given eased progress.
+   * Uses precomputed path complexity weights so speed dynamically slows down on sharp corners
+   * and intricate curves, and accelerates on smooth straights.
+   */
+  private getStrokePointAtProgress(stroke: DrawingStroke, easedProg: number): StrokePoint {
     const pts = stroke.points;
-    if (pts.length <= 1) return pts[0] || { x: 0, y: 0, pressure: 0.5 };
+    if (pts.length === 0) return { x: 0, y: 0, pressure: 0.5 };
+    if (pts.length === 1 || easedProg <= 0) return pts[0];
+    if (easedProg >= 1.0) return pts[pts.length - 1];
 
-    const totalSegments = pts.length - 1;
-    const exactIndex = progress * totalSegments;
-    const baseIdx = Math.min(totalSegments - 1, Math.floor(exactIndex));
-    const frac = exactIndex - baseIdx;
+    const comp = this.strokeComplexityMap.get(stroke) || computeStrokeComplexity(stroke);
+    const weights = comp.cumulativeTimeWeights;
+    const targetWeight = easedProg * comp.totalTimeWeight;
 
-    const p1 = pts[baseIdx];
-    const p2 = pts[baseIdx + 1] || p1;
+    // Binary search for segment i where weights[i] <= targetWeight <= weights[i + 1]
+    let low = 0;
+    let high = weights.length - 1;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (weights[mid] < targetWeight) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    const idx = Math.max(0, Math.min(pts.length - 2, high));
+    const w0 = weights[idx];
+    const w1 = weights[idx + 1];
+    const segWeight = Math.max(1e-5, w1 - w0);
+    const frac = Math.max(0, Math.min(1, (targetWeight - w0) / segWeight));
+
+    const p1 = pts[idx];
+    const p2 = pts[idx + 1];
 
     return {
       x: p1.x + (p2.x - p1.x) * frac,
@@ -352,43 +706,21 @@ export class AnimationController {
   private rebuildPaperUpTo(targetTime: number) {
     if (!this.drawingData) return;
 
-    this.strokeProgress = new Array(this.drawingData.strokes.length).fill(0);
+    for (let i = 0; i < this.strokeDrawnProgress.length; i++) {
+      this.strokeDrawnProgress[i] = 0;
+    }
 
-    for (let p = 1; p <= 6; p++) {
-      const pConfig = this.phaseTimes[p - 1];
-      const phaseStrokes = this.drawingData.strokes.filter(s => s.phase === p);
-      const phaseTotalLen = this.drawingData.phaseLengths[p] || 1;
-
-      if (targetTime >= pConfig.end) {
-        // Fully draw this phase
-        for (const s of phaseStrokes) {
-          const sIdx = this.drawingData.strokes.indexOf(s);
-          this.drawStrokeSegment(s, 0, 1.0);
-          this.strokeProgress[sIdx] = 1.0;
-        }
-      } else if (targetTime > pConfig.start) {
-        // Partially draw this phase
-        const phaseProgress = (targetTime - pConfig.start) / (pConfig.end - pConfig.start);
-        const targetDist = phaseProgress * phaseTotalLen;
-        let accumulated = 0;
-
-        for (const s of phaseStrokes) {
-          const sIdx = this.drawingData.strokes.indexOf(s);
-          const sEnd = accumulated + s.length;
-
-          if (targetDist >= sEnd) {
-            this.drawStrokeSegment(s, 0, 1.0);
-            this.strokeProgress[sIdx] = 1.0;
-          } else if (targetDist > accumulated) {
-            const prog = (targetDist - accumulated) / s.length;
-            this.drawStrokeSegment(s, 0, prog);
-            this.strokeProgress[sIdx] = prog;
-            break;
-          } else {
-            break;
-          }
-          accumulated += s.length;
-        }
+    for (const sched of this.scheduledStrokes) {
+      const sIdx = this.drawingData.strokes.indexOf(sched.stroke);
+      if (targetTime >= sched.endTime) {
+        this.drawStrokeSegment(sched.stroke, 0, 1.0);
+        this.strokeDrawnProgress[sIdx] = 1.0;
+      } else if (targetTime > sched.startTime) {
+        const rawProg = Math.max(0, Math.min(1, (targetTime - sched.startTime) / Math.max(0.001, sched.drawDuration)));
+        const easeProg = easeHumanDrawingStroke(rawProg);
+        this.drawStrokeSegment(sched.stroke, 0, easeProg);
+        this.strokeDrawnProgress[sIdx] = easeProg;
+      } else {
         break;
       }
     }
@@ -397,43 +729,64 @@ export class AnimationController {
   private updateHandPositionAt(targetTime: number) {
     if (!this.drawingData) return;
 
-    const pConfig = this.getCurrentPhaseConfig(targetTime);
-
-    if (targetTime <= 0.5) {
+    if (targetTime <= 1.0) {
       this.handX = this.drawingData.width * 1.35;
-      this.handY = this.drawingData.height * 0.45;
+      this.handY = this.drawingData.height * 0.95;
+      this.handLift = 1.0;
       this.isHandDrawing = false;
       return;
     }
 
-    if (targetTime >= 59.0) {
-      this.handX = this.drawingData.width * 1.4;
-      this.handY = this.drawingData.height * 0.5;
+    if (targetTime >= 59.2) {
+      this.handX = this.drawingData.width * 1.38;
+      this.handY = this.drawingData.height * 0.92;
+      this.handLift = 1.0;
       this.isHandDrawing = false;
       return;
     }
 
-    // Find stroke currently active
-    const activeStrokeIdx = this.strokeProgress.findIndex(p => p > 0 && p < 1.0);
-    if (activeStrokeIdx !== -1) {
-      const s = this.drawingData.strokes[activeStrokeIdx];
-      const pt = this.getStrokePointAtProgress(s, this.strokeProgress[activeStrokeIdx]);
-      this.handX = pt.x;
-      this.handY = pt.y;
-      this.isHandDrawing = true;
-    } else {
-      // Find latest drawn stroke
-      let lastIdx = 0;
-      for (let i = 0; i < this.strokeProgress.length; i++) {
-        if (this.strokeProgress[i] > 0) lastIdx = i;
-      }
-      const s = this.drawingData.strokes[lastIdx];
-      if (s) {
-        const pt = s.points[s.points.length - 1];
+    // Find active stroke or pause at targetTime
+    for (let i = 0; i < this.scheduledStrokes.length; i++) {
+      const sched = this.scheduledStrokes[i];
+      if (targetTime >= sched.startTime && targetTime < sched.endTime) {
+        const rawProg = Math.max(0, Math.min(1, (targetTime - sched.startTime) / Math.max(0.001, sched.drawDuration)));
+        const easeProg = easeHumanDrawingStroke(rawProg);
+        const pt = this.getStrokePointAtProgress(sched.stroke, easeProg);
         this.handX = pt.x;
         this.handY = pt.y;
+        this.handLift = 0.0;
+        this.isHandDrawing = true;
+        return;
+      } else if (targetTime >= sched.endTime && targetTime < sched.endTime + sched.pauseAfter) {
+        const pauseProg = Math.max(0, Math.min(1, (targetTime - sched.endTime) / Math.max(0.001, sched.pauseAfter)));
+        const fromPt = sched.stroke.points[sched.stroke.points.length - 1];
+        const nextSched = this.scheduledStrokes[i + 1];
+        const toPt = nextSched ? nextSched.stroke.points[0] : fromPt;
+
+        if (pauseProg < 0.22) {
+          // Lift-off pause
+          this.handLift = easeOutCubic(pauseProg / 0.22);
+          this.handX = fromPt.x;
+          this.handY = fromPt.y;
+        } else if (pauseProg < 0.78) {
+          // Transit flight
+          const transitProg = (pauseProg - 0.22) / 0.56;
+          const transitEase = easeMinimumJerk(transitProg);
+          const arc = Math.sin(transitProg * Math.PI) * -14;
+          this.handX = fromPt.x + (toPt.x - fromPt.x) * transitEase;
+          this.handY = fromPt.y + (toPt.y - fromPt.y) * transitEase + arc;
+          this.handLift = 1.0;
+        } else {
+          // Landing hover pause
+          const landProg = (pauseProg - 0.78) / 0.22;
+          this.handLift = Math.max(0, 1.0 - easeInOutCubic(landProg));
+          this.handX = toPt.x;
+          this.handY = toPt.y;
+        }
+
+        this.isHandDrawing = false;
+        return;
       }
-      this.isHandDrawing = false;
     }
   }
 
@@ -442,26 +795,27 @@ export class AnimationController {
     const ctx = this.overlayCtx;
     ctx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
 
-    const scale = this.overlayCanvas.width / this.drawingData.width;
-
-    handRenderer.render(
-      ctx,
-      this.handX * scale,
-      this.handY * scale,
-      this.isHandDrawing,
-      this.handVx,
-      this.handVy,
-      this.style,
-      this.currentTime,
-      scale
-    );
+    if (this.handMode === 'sprite') {
+      const scale = this.overlayCanvas.width / this.drawingData.width;
+      handRenderer.render(
+        ctx,
+        this.handX * scale,
+        this.handY * scale,
+        this.isHandDrawing,
+        this.handVx,
+        this.handVy,
+        this.style,
+        this.currentTime,
+        scale
+      );
+    }
   }
 
   private getCurrentPhaseConfig(t: number) {
-    for (const p of this.phaseTimes) {
+    for (const p of this.phaseWindows) {
       if (t >= p.start && t <= p.end) return p;
     }
-    return this.phaseTimes[this.phaseTimes.length - 1];
+    return this.phaseWindows[this.phaseWindows.length - 1];
   }
 
   private notifyState() {
@@ -475,19 +829,28 @@ export class AnimationController {
       isFinished: this.currentTime >= this.totalDuration,
       currentPhase: pConfig.phase,
       phaseName: pConfig.name,
-      progress: this.currentTime / this.totalDuration,
+      progress: Math.min(1.0, this.currentTime / this.totalDuration),
       handPos: {
         x: this.handX,
         y: this.handY,
         isDrawing: this.isHandDrawing,
         vx: this.handVx,
-        vy: this.handVy
-      }
+        vy: this.handVy,
+        lift: this.handLift,
+        angle: this.handAngle
+      },
+      handMode: this.handMode
     });
   }
 
   public destroy() {
     this.pause();
+    this.drawingData = null;
+    this.paperCanvas = null;
+    this.paperCtx = null;
+    this.overlayCanvas = null;
+    this.overlayCtx = null;
+    this.onStateChange = null;
   }
 }
 
