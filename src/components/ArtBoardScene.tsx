@@ -49,21 +49,49 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
   const [showDebugOverlay, setShowDebugOverlay] = useState<boolean>(initialDebug);
   const hideTimerRef = useRef<number | null>(null);
 
-  // Resize observer to track exact paper sheet display dimensions
-  useEffect(() => {
-    if (!paperSheetRef.current) return;
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        if (width > 0 && height > 0) {
-          setSheetDimensions({ width, height });
-        }
+  // Update exact screen geometry and coordinate mapping between paper and overlay canvas
+  const updateCanvasesGeometry = () => {
+    if (!containerRef.current || !paperSheetRef.current || !overlayCanvasRef.current) return;
+    const containerRect = containerRef.current.getBoundingClientRect();
+    const paperRect = paperSheetRef.current.getBoundingClientRect();
+
+    if (containerRect.width > 0 && containerRect.height > 0) {
+      const targetW = Math.round(containerRect.width);
+      const targetH = Math.round(containerRect.height);
+      if (
+        overlayCanvasRef.current.width !== targetW ||
+        overlayCanvasRef.current.height !== targetH
+      ) {
+        overlayCanvasRef.current.width = targetW;
+        overlayCanvasRef.current.height = targetH;
       }
+
+      if (paperRect.width > 0 && drawingData.width > 0) {
+        setSheetDimensions({ width: paperRect.width, height: paperRect.height });
+        const offsetX = paperRect.left - containerRect.left;
+        const offsetY = paperRect.top - containerRect.top;
+        const scale = paperRect.width / drawingData.width;
+        animationController.setOverlayTransform(offsetX, offsetY, scale);
+      }
+    }
+  };
+
+  // Resize observer to track exact paper sheet & container display dimensions
+  useEffect(() => {
+    updateCanvasesGeometry();
+    const observer = new ResizeObserver(() => {
+      updateCanvasesGeometry();
     });
 
-    observer.observe(paperSheetRef.current);
-    return () => observer.disconnect();
-  }, []);
+    if (containerRef.current) observer.observe(containerRef.current);
+    if (paperSheetRef.current) observer.observe(paperSheetRef.current);
+    window.addEventListener('resize', updateCanvasesGeometry);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateCanvasesGeometry);
+    };
+  }, [drawingData]);
 
   // Initialize canvases & animation controller
   useEffect(() => {
@@ -71,14 +99,15 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
 
     paperCanvasRef.current.width = drawingData.width;
     paperCanvasRef.current.height = drawingData.height;
-    overlayCanvasRef.current.width = drawingData.width;
-    overlayCanvasRef.current.height = drawingData.height;
 
     animationController.setCanvases(paperCanvasRef.current, overlayCanvasRef.current);
     animationController.setCallback((state) => {
       setTimelineState(state);
     });
     animationController.loadDrawing(drawingData, style);
+
+    // Initial transform sync
+    setTimeout(updateCanvasesGeometry, 50);
 
     // Auto-play after 450ms for immediate start, unless in initial debug verification mode
     let timer: NodeJS.Timeout | null = null;
@@ -308,7 +337,7 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
             <div
               id="paper-sheet"
               ref={paperSheetRef}
-              className="relative w-full h-full overflow-hidden rounded-[2px] bg-[#fcf9f2] shadow-[0_12px_32px_rgba(0,0,0,0.45),0_2px_6px_rgba(0,0,0,0.25)] ring-1 ring-stone-300/40"
+              className="relative w-full h-full overflow-hidden rounded-[2px] bg-[#fbf8f0] shadow-[0_4px_12px_rgba(0,0,0,0.3),0_18px_48px_rgba(0,0,0,0.55)] ring-1 ring-stone-400/30"
             >
               <canvas
                 ref={paperCanvasRef}
@@ -324,16 +353,6 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
               onClose={() => setShowDebugOverlay(false)}
               onPlayAnimation={togglePlay}
               isPlaying={timelineState.isPlaying}
-            />
-
-            {/* Overlay Canvas for Photographic Sprite Mode with Unconstrained Overflow */}
-            <canvas
-              ref={overlayCanvasRef}
-              id="overlay-canvas"
-              className={`absolute inset-0 block w-full h-full object-contain pointer-events-none z-30 transition-opacity duration-200 ${
-                showDebugOverlay && !timelineState.isPlaying ? 'opacity-0' : 'opacity-100'
-              }`}
-              style={{ overflow: 'visible' }}
             />
 
             {/* The Representative Hand Component Layered Over Drawing Surface */}
@@ -354,6 +373,15 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Photographic Hand Sprite Overlay Canvas (Full Viewport Coverage so Forearm Extends Naturally Off-Screen) */}
+      <canvas
+        ref={overlayCanvasRef}
+        id="overlay-canvas"
+        className={`absolute inset-0 w-full h-full pointer-events-none z-30 transition-opacity duration-200 ${
+          showDebugOverlay && !timelineState.isPlaying ? 'opacity-0' : 'opacity-100'
+        }`}
+      />
 
       {/* Floating Interactive Controls (Screen-Recording Ready) */}
       <ControlsOverlay

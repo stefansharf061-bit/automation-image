@@ -196,6 +196,9 @@ export class AnimationController {
   private style: DrawingStyle = 'pencil';
   private handMode: 'representative' | 'sprite' = 'sprite';
 
+  // Coordinate transform when overlayCanvas is positioned over the full scene/container
+  private overlayTransform = { offsetX: 0, offsetY: 0, scale: 1 };
+
   private onStateChange: ((state: TimelineState) => void) | null = null;
 
   // Strict 6-phase timeline boundaries (sum = 60.0s)
@@ -213,6 +216,11 @@ export class AnimationController {
     this.paperCtx = paperCanvas.getContext('2d', { willReadFrequently: false });
     this.overlayCanvas = overlayCanvas;
     this.overlayCtx = overlayCanvas.getContext('2d');
+  }
+
+  public setOverlayTransform(offsetX: number, offsetY: number, scale: number) {
+    this.overlayTransform = { offsetX, offsetY, scale };
+    this.renderOverlay();
   }
 
   public setCallback(cb: (state: TimelineState) => void) {
@@ -627,34 +635,49 @@ export class AnimationController {
     const pts = stroke.points;
     if (pts.length < 2) return;
 
-    // Use path complexity mapping so canvas rendering matches pencil tip exactly
-    const startIdx = this.getSegmentIndexAtProgress(stroke, fromProg);
-    const endIdx = Math.min(pts.length - 1, this.getSegmentIndexAtProgress(stroke, toProg) + 1);
-
     ctx.save();
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
-    for (let i = Math.max(0, startIdx); i < Math.min(pts.length - 1, endIdx); i++) {
-      const p1 = pts[i];
-      const p2 = pts[i + 1];
+    const pStart = this.getStrokePointAtProgress(stroke, fromProg);
+    const pEnd = this.getStrokePointAtProgress(stroke, toProg);
+
+    const pressure = (pStart.pressure + pEnd.pressure) / 2;
+    const width = stroke.baseWidth * (0.65 + pressure * 0.75);
+    ctx.lineWidth = width;
+
+    if (stroke.style === 'pencil') {
+      ctx.strokeStyle = `rgba(38, 36, 33, ${stroke.alpha * (0.55 + pressure * 0.45)})`;
+    } else if (stroke.style === 'charcoal') {
+      ctx.strokeStyle = `rgba(20, 18, 16, ${stroke.alpha * (0.65 + pressure * 0.5)})`;
+    } else {
+      ctx.strokeStyle = `rgba(8, 8, 8, ${stroke.alpha})`;
+    }
+
+    if (fromProg <= 0 && toProg >= 1.0) {
+      // Whole stroke rendering on timeline scrub / rebuild
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) {
+        ctx.lineTo(pts[i].x, pts[i].y);
+      }
+      ctx.stroke();
+    } else {
+      // Precision incremental segment: marks strictly from pStart to pEnd
+      // The mark terminates at pEnd, which is mathematically identical to the pencil tip position
+      const startIdx = this.getSegmentIndexAtProgress(stroke, fromProg);
+      const endIdx = this.getSegmentIndexAtProgress(stroke, toProg);
 
       ctx.beginPath();
-      ctx.moveTo(p1.x, p1.y);
-      ctx.lineTo(p2.x, p2.y);
+      ctx.moveTo(pStart.x, pStart.y);
 
-      const pressure = (p1.pressure + p2.pressure) / 2;
-      const width = stroke.baseWidth * (0.65 + pressure * 0.75);
-      ctx.lineWidth = width;
-
-      if (stroke.style === 'pencil') {
-        ctx.strokeStyle = `rgba(38, 36, 33, ${stroke.alpha * (0.55 + pressure * 0.45)})`;
-      } else if (stroke.style === 'charcoal') {
-        ctx.strokeStyle = `rgba(20, 18, 16, ${stroke.alpha * (0.65 + pressure * 0.5)})`;
-      } else {
-        ctx.strokeStyle = `rgba(8, 8, 8, ${stroke.alpha})`;
+      if (endIdx > startIdx) {
+        for (let i = startIdx + 1; i <= endIdx; i++) {
+          ctx.lineTo(pts[i].x, pts[i].y);
+        }
       }
 
+      ctx.lineTo(pEnd.x, pEnd.y);
       ctx.stroke();
     }
 
@@ -796,17 +819,20 @@ export class AnimationController {
     ctx.clearRect(0, 0, this.overlayCanvas.width, this.overlayCanvas.height);
 
     if (this.handMode === 'sprite') {
-      const scale = this.overlayCanvas.width / this.drawingData.width;
+      const t = this.overlayTransform;
+      const renderX = t.offsetX + this.handX * t.scale;
+      const renderY = t.offsetY + this.handY * t.scale;
+
       handRenderer.render(
         ctx,
-        this.handX * scale,
-        this.handY * scale,
+        renderX,
+        renderY,
         this.isHandDrawing,
         this.handVx,
         this.handVy,
         this.style,
         this.currentTime,
-        scale
+        t.scale
       );
     }
   }

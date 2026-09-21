@@ -687,21 +687,52 @@ export function processImageToDrawing(
   );
 
   // ==========================================================================
-  // PHASE 1: Deliberate Anatomical Construction Gestures (6 strokes)
+  // PHASE 1: Deliberate Subject-Adaptive Construction Gestures (5 strokes)
+  // Dynamically anchored to the detected subject's actual bounding box and center of mass,
+  // making it completely authentic for portraits, objects, still life, or landscapes.
   // ==========================================================================
-  const constructionStrokes: { points: StrokePoint[]; length: number }[] = [];
-  const centerX = offsetX + finalW / 2;
-  const centerY = offsetY + finalH / 2;
+  let minContourX = Infinity, maxContourX = -Infinity;
+  let minContourY = Infinity, maxContourY = -Infinity;
+  let sumContourX = 0, sumContourY = 0, contourPtsCount = 0;
 
-  // 1. Head / Subject Gesture Oval
+  for (const c of consolidated) {
+    for (const p of c.points) {
+      if (p.x < minContourX) minContourX = p.x;
+      if (p.x > maxContourX) maxContourX = p.x;
+      if (p.y < minContourY) minContourY = p.y;
+      if (p.y > maxContourY) maxContourY = p.y;
+      sumContourX += p.x;
+      sumContourY += p.y;
+      contourPtsCount++;
+    }
+  }
+
+  if (contourPtsCount === 0) {
+    minContourX = offsetX + finalW * 0.15;
+    maxContourX = offsetX + finalW * 0.85;
+    minContourY = offsetY + finalH * 0.12;
+    maxContourY = offsetY + finalH * 0.88;
+    sumContourX = (minContourX + maxContourX) * 0.5;
+    sumContourY = (minContourY + maxContourY) * 0.5;
+    contourPtsCount = 1;
+  }
+
+  const subjW = Math.max(80, maxContourX - minContourX);
+  const subjH = Math.max(80, maxContourY - minContourY);
+  const subjCx = (minContourX + maxContourX) / 2;
+  const subjCy = (minContourY + maxContourY) / 2;
+
+  const constructionStrokes: { points: StrokePoint[]; length: number }[] = [];
+
+  // 1. Primary Subject Gesture Envelope (bounding silhouette arc)
   const ovalPoints: StrokePoint[] = [];
-  for (let a = -Math.PI; a <= Math.PI + 0.1; a += Math.PI / 12) {
-    const rx = finalW * 0.36 * (1 + Math.sin(a * 2) * 0.03);
-    const ry = finalH * 0.42 * (1 + Math.cos(a * 2) * 0.03);
+  for (let a = -Math.PI; a <= Math.PI + 0.08; a += Math.PI / 14) {
+    const rx = subjW * 0.52 * (1 + Math.sin(a * 2) * 0.03);
+    const ry = subjH * 0.52 * (1 + Math.cos(a * 2) * 0.03);
     ovalPoints.push({
-      x: centerX + Math.cos(a) * rx,
-      y: centerY + Math.sin(a) * ry,
-      pressure: 0.22
+      x: Math.round(subjCx + Math.cos(a) * rx),
+      y: Math.round(subjCy + Math.sin(a) * ry),
+      pressure: 0.38
     });
   }
   const smoothedOval = smoothPoints(ovalPoints);
@@ -709,49 +740,40 @@ export function processImageToDrawing(
   for (let i = 1; i < smoothedOval.length; i++) ovalLen += dist(smoothedOval[i - 1], smoothedOval[i]);
   constructionStrokes.push({ points: smoothedOval, length: ovalLen });
 
-  // 2. Vertical Line of Symmetry (central facial axis)
+  // 2. Central Structural Axis (major vertical symmetry / orientation vector)
   const vertPts: StrokePoint[] = [
-    { x: centerX, y: offsetY + finalH * 0.07, pressure: 0.18 },
-    { x: centerX, y: offsetY + finalH * 0.91, pressure: 0.22 }
+    { x: Math.round(subjCx), y: Math.round(minContourY - subjH * 0.04), pressure: 0.35 },
+    { x: Math.round(subjCx), y: Math.round(maxContourY + subjH * 0.04), pressure: 0.42 }
   ];
   constructionStrokes.push({ points: vertPts, length: dist(vertPts[0], vertPts[1]) });
 
-  // 3. Horizontal Eyeline Guide
-  const eyeLinePts: StrokePoint[] = [
-    { x: offsetX + finalW * 0.14, y: centerY - finalH * 0.07, pressure: 0.18 },
-    { x: offsetX + finalW * 0.86, y: centerY - finalH * 0.06, pressure: 0.22 }
+  // 3. Primary Upper Division Line (e.g. Eyeline in portraits, major upper division in objects)
+  const upperDivY = Math.round(subjCy - subjH * 0.16);
+  const upperPts: StrokePoint[] = [
+    { x: Math.round(subjCx - subjW * 0.44), y: upperDivY - 2, pressure: 0.36 },
+    { x: Math.round(subjCx + subjW * 0.44), y: upperDivY + 2, pressure: 0.40 }
   ];
-  constructionStrokes.push({ points: eyeLinePts, length: dist(eyeLinePts[0], eyeLinePts[1]) });
+  constructionStrokes.push({ points: upperPts, length: dist(upperPts[0], upperPts[1]) });
 
-  // 4. Nose Base / Brow Alignment Marker
-  const noseLinePts: StrokePoint[] = [
-    { x: centerX - finalW * 0.18, y: centerY + finalH * 0.09, pressure: 0.17 },
-    { x: centerX + finalW * 0.18, y: centerY + finalH * 0.095, pressure: 0.2 }
+  // 4. Secondary Lower Division Line (e.g. Nose base / mouth in portraits, lower shelf in objects)
+  const lowerDivY = Math.round(subjCy + subjH * 0.18);
+  const lowerPts: StrokePoint[] = [
+    { x: Math.round(subjCx - subjW * 0.35), y: lowerDivY, pressure: 0.35 },
+    { x: Math.round(subjCx + subjW * 0.35), y: lowerDivY, pressure: 0.38 }
   ];
-  constructionStrokes.push({ points: noseLinePts, length: dist(noseLinePts[0], noseLinePts[1]) });
+  constructionStrokes.push({ points: lowerPts, length: dist(lowerPts[0], lowerPts[1]) });
 
-  // 5. Chin & Jaw Alignment Gesture
-  const chinPts: StrokePoint[] = [
-    { x: centerX - finalW * 0.22, y: centerY + finalH * 0.25, pressure: 0.2 },
-    { x: centerX, y: centerY + finalH * 0.32, pressure: 0.24 },
-    { x: centerX + finalW * 0.22, y: centerY + finalH * 0.25, pressure: 0.2 }
+  // 5. Grounding Silhouette / Base Anchor Gesture
+  const baseAnchorY = Math.round(maxContourY + subjH * 0.02);
+  const basePts: StrokePoint[] = [
+    { x: Math.round(subjCx - subjW * 0.45), y: baseAnchorY, pressure: 0.36 },
+    { x: Math.round(subjCx), y: baseAnchorY + 4, pressure: 0.42 },
+    { x: Math.round(subjCx + subjW * 0.45), y: baseAnchorY, pressure: 0.36 }
   ];
-  const smoothedChin = smoothPoints(chinPts);
-  let chinLen = 0;
-  for (let i = 1; i < smoothedChin.length; i++) chinLen += dist(smoothedChin[i - 1], smoothedChin[i]);
-  constructionStrokes.push({ points: smoothedChin, length: chinLen });
-
-  // 6. Shoulder / Collar Tilt Guide
-  const shoulderPts: StrokePoint[] = [
-    { x: offsetX + finalW * 0.1, y: offsetY + finalH * 0.78, pressure: 0.18 },
-    { x: centerX, y: offsetY + finalH * 0.75, pressure: 0.2 },
-    { x: offsetX + finalW * 0.9, y: offsetY + finalH * 0.8, pressure: 0.18 }
-  ];
-  const smoothedShoulder = smoothPoints(shoulderPts);
-  let shoulderLen = 0;
-  for (let i = 1; i < smoothedShoulder.length; i++)
-    shoulderLen += dist(smoothedShoulder[i - 1], smoothedShoulder[i]);
-  constructionStrokes.push({ points: smoothedShoulder, length: shoulderLen });
+  const smoothedBase = smoothPoints(basePts);
+  let baseLen = 0;
+  for (let i = 1; i < smoothedBase.length; i++) baseLen += dist(smoothedBase[i - 1], smoothedBase[i]);
+  constructionStrokes.push({ points: smoothedBase, length: baseLen });
 
   // ==========================================================================
   // PATH COUNT GOVERNANCE & BUDGETING: ENFORCING 80-180 COHERENT PATHS
@@ -804,9 +826,9 @@ export function processImageToDrawing(
       phase: 1,
       phaseName: 'Construction Marks',
       points: cs.points,
-      color: '#8e8b86',
-      baseWidth: 1.0,
-      alpha: 0.28,
+      color: style === 'pencil' ? '#686561' : style === 'charcoal' ? '#4d4a46' : '#55514d',
+      baseWidth: 1.3,
+      alpha: 0.52,
       style,
       length: cs.length
     });

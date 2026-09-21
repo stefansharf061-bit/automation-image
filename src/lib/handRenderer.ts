@@ -24,8 +24,8 @@ interface HandConfig {
 const HAND_CONFIGS: Record<DrawingStyle, HandConfig> = {
   pencil: {
     file: '/assets/hand_pencil.png',
-    tipX: 149,
-    tipY: 866,
+    tipX: 147,
+    tipY: 871,
     wristX: 720,
     wristY: 380,
     scale: 0.82,
@@ -36,15 +36,15 @@ const HAND_CONFIGS: Record<DrawingStyle, HandConfig> = {
       max: 488
     },
     skinColors: {
-      highlight: '#caa382',
-      mid: '#966d51',
-      shadow: '#5e402b'
+      highlight: '#d5aa89',
+      mid: '#a37557',
+      shadow: '#66432c'
     }
   },
   charcoal: {
     file: '/assets/hand_charcoal.png',
-    tipX: 314,
-    tipY: 571,
+    tipX: 397,
+    tipY: 895,
     wristX: 780,
     wristY: 240,
     scale: 0.86,
@@ -55,16 +55,16 @@ const HAND_CONFIGS: Record<DrawingStyle, HandConfig> = {
       max: 260
     },
     skinColors: {
-      highlight: '#bfa085',
-      mid: '#8c654b',
-      shadow: '#543926'
+      highlight: '#c8a68b',
+      mid: '#966d51',
+      shadow: '#5e402b'
     }
   },
   fineliner: {
     file: '/assets/hand_fineliner.png',
-    tipX: 342,
-    tipY: 748,
-    wristX: 620,
+    tipX: 634,
+    tipY: 897,
+    wristX: 540,
     wristY: 680,
     scale: 0.8,
     baseAngle: 0.0,
@@ -74,9 +74,9 @@ const HAND_CONFIGS: Record<DrawingStyle, HandConfig> = {
       max: 672
     },
     skinColors: {
-      highlight: '#cdab8f',
-      mid: '#9b7357',
-      shadow: '#5c3e29'
+      highlight: '#d5b397',
+      mid: '#a3795b',
+      shadow: '#64442e'
     }
   }
 };
@@ -162,22 +162,22 @@ export class HandRenderer {
     const targetAngle = config.baseAngle + sweepAngle + wristDeflection;
     this.currentAngle += (targetAngle - this.currentAngle) * 0.14;
 
-    // 2. Smooth lift transition between strokes (pencil elevation)
-    const targetLift = isDrawing ? 0 : 1;
-    this.currentLift += (targetLift - this.currentLift) * 0.18;
+    // 2. Strict Pencil Tip Synchronization
+    // When drawing, contact is 100% authoritative: zero lift offset, zero tremor jitter.
+    // When lifted between strokes, the pencil naturally floats up and glides.
+    let handX: number;
+    let handY: number;
 
-    // Subtle physiological pulse/breathing tremor
-    const tremorX = Math.sin(time * 16.2) * 0.45 + Math.cos(time * 6.8) * 0.3;
-    const tremorY = Math.cos(time * 14.1) * 0.4 + Math.sin(time * 8.4) * 0.28;
-
-    // Contact placement on paper
-    const drawX = x + tremorX;
-    const drawY = y + tremorY;
-
-    // When lifted, pencil floats up and slightly right
-    const liftOffset = this.currentLift * 20 * paperScale;
-    const handX = drawX + this.currentLift * 6 * paperScale;
-    const handY = drawY - liftOffset;
+    if (isDrawing) {
+      this.currentLift = 0;
+      handX = x;
+      handY = y;
+    } else {
+      this.currentLift = Math.min(1.0, this.currentLift + 0.15);
+      const liftOffset = this.currentLift * 24 * paperScale;
+      handX = x + this.currentLift * 8 * paperScale;
+      handY = y - liftOffset;
+    }
 
     const renderScale = config.scale * paperScale;
     const wristOffsetX = config.wristX * renderScale;
@@ -234,16 +234,16 @@ export class HandRenderer {
     // -------------------------------------------------------------
     ctx.save();
     const tipShadowDist = (1.5 + this.currentLift * 14) * paperScale;
-    const tipShadowAlpha = Math.max(0, 0.65 - this.currentLift * 0.52);
+    const tipShadowAlpha = isDrawing ? 0.75 : Math.max(0, 0.45 - this.currentLift * 0.45);
 
     if (tipShadowAlpha > 0.04) {
       const grad = ctx.createRadialGradient(
-        drawX + tipShadowDist,
-        drawY + tipShadowDist * 0.85,
+        handX + tipShadowDist,
+        handY + tipShadowDist * 0.85,
         0,
-        drawX + tipShadowDist,
-        drawY + tipShadowDist * 0.85,
-        (4 + this.currentLift * 7) * paperScale
+        handX + tipShadowDist,
+        handY + tipShadowDist * 0.85,
+        (3.5 + this.currentLift * 7) * paperScale
       );
       grad.addColorStop(0, `rgba(32, 26, 22, ${tipShadowAlpha})`);
       grad.addColorStop(1, 'rgba(32, 26, 22, 0)');
@@ -251,9 +251,9 @@ export class HandRenderer {
       ctx.fillStyle = grad;
       ctx.beginPath();
       ctx.arc(
-        drawX + tipShadowDist,
-        drawY + tipShadowDist * 0.85,
-        (4 + this.currentLift * 7) * paperScale,
+        handX + tipShadowDist,
+        handY + tipShadowDist * 0.85,
+        (3.5 + this.currentLift * 7) * paperScale,
         0,
         Math.PI * 2
       );
@@ -269,11 +269,10 @@ export class HandRenderer {
     ctx.translate(wristWorldX, wristWorldY);
     ctx.rotate(this.currentAngle);
 
-    // 3A. Extended Forearm Continuity: organic extension extending off-screen
+    // 3A. Extended Forearm Continuity (underneath photo asset)
     this.renderForearmExtension(ctx, config, renderScale, wristOffsetX, wristOffsetY, false);
 
     // 3B. Photographic hand & pencil sprite
-    ctx.filter = 'drop-shadow(2px 3px 5px rgba(0, 0, 0, 0.12))';
     ctx.drawImage(
       img,
       -wristOffsetX,
@@ -282,12 +281,15 @@ export class HandRenderer {
       img.naturalHeight * renderScale
     );
 
+    // 3C. Seam Blending Overlay: Feather the cut edge of the photographic asset
+    this.renderSeamBlend(ctx, config, renderScale, wristOffsetX, wristOffsetY);
+
     ctx.restore();
   }
 
   /**
    * Render an organic forearm cylinder extending seamlessly from the PNG cut boundary
-   * to eliminate any visible cut-off or severed arm edge.
+   * all the way off-screen (2500px length) to eliminate any visible cut-off or severed arm edge.
    */
   private renderForearmExtension(
     ctx: CanvasRenderingContext2D,
@@ -297,7 +299,7 @@ export class HandRenderer {
     wristOffsetY: number,
     isShadow: boolean
   ) {
-    const extLength = 540 * scale;
+    const extLength = 2600 * scale;
 
     if (config.cutEdge.type === 'right') {
       // Right edge cut (pencil): x = 1024, y from min to max relative to wrist pivot
@@ -306,37 +308,62 @@ export class HandRenderer {
       const seamY2 = (config.cutEdge.max * scale) - wristOffsetY;
       const armWidth = seamY2 - seamY1;
 
-      // Extend down and right along the arm trajectory
+      // Extend down and right along the arm trajectory off-screen
       const endX = seamX + extLength * 0.95;
       const endY1 = seamY1 + extLength * 0.45;
-      const endY2 = endY1 + armWidth * 1.15;
+      const endY2 = endY1 + armWidth * 1.25;
 
       ctx.save();
       ctx.beginPath();
-      ctx.moveTo(seamX - 18 * scale, seamY1);
+      ctx.moveTo(seamX - 35 * scale, seamY1 - 5 * scale);
       ctx.lineTo(endX, endY1);
       ctx.lineTo(endX, endY2);
-      ctx.lineTo(seamX - 18 * scale, seamY2);
+      ctx.lineTo(seamX - 35 * scale, seamY2 + 10 * scale);
       ctx.closePath();
 
       if (isShadow) {
         ctx.fillStyle = '#1e1c18';
         ctx.fill();
       } else {
-        // Organic skin gradient matching studio desk lamp
-        const grad = ctx.createLinearGradient(seamX, seamY1, seamX, seamY2);
-        grad.addColorStop(0, config.skinColors.highlight);
-        grad.addColorStop(0.42, config.skinColors.mid);
-        grad.addColorStop(1, config.skinColors.shadow);
-        ctx.fillStyle = grad;
+        // Natural transition: skin near wrist -> dark artist smock sleeve
+        const sleeveStartX = seamX + 90 * scale;
+        const sleeveEndX = seamX + 130 * scale;
+
+        // Base skin arm
+        const skinGrad = ctx.createLinearGradient(seamX, seamY1, seamX, seamY2);
+        skinGrad.addColorStop(0, config.skinColors.highlight);
+        skinGrad.addColorStop(0.42, config.skinColors.mid);
+        skinGrad.addColorStop(1, config.skinColors.shadow);
+        ctx.fillStyle = skinGrad;
         ctx.fill();
 
-        // Feathered blend over the seam
-        const blendGrad = ctx.createLinearGradient(seamX - 25 * scale, 0, seamX + 25 * scale, 0);
-        blendGrad.addColorStop(0, 'rgba(0,0,0,0)');
-        blendGrad.addColorStop(0.5, 'rgba(150, 110, 80, 0.3)');
-        blendGrad.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.fillStyle = blendGrad;
+        // Dark artist sweater / smock sleeve extending off-screen
+        ctx.beginPath();
+        ctx.moveTo(sleeveStartX, seamY1 + (endY1 - seamY1) * (sleeveStartX - seamX) / extLength - 8 * scale);
+        ctx.lineTo(endX, endY1);
+        ctx.lineTo(endX, endY2);
+        ctx.lineTo(sleeveStartX, seamY2 + (endY2 - seamY2) * (sleeveStartX - seamX) / extLength + 10 * scale);
+        ctx.closePath();
+
+        const sleeveGrad = ctx.createLinearGradient(sleeveStartX, seamY1, endX, endY2);
+        sleeveGrad.addColorStop(0, '#23272f');
+        sleeveGrad.addColorStop(0.3, '#1c1f26');
+        sleeveGrad.addColorStop(1, '#13151a');
+        ctx.fillStyle = sleeveGrad;
+        ctx.fill();
+
+        // Sleeve cuff rim highlight
+        ctx.beginPath();
+        ctx.ellipse(
+          sleeveStartX,
+          (seamY1 + seamY2) * 0.5 + 25 * scale,
+          10 * scale,
+          armWidth * 0.55,
+          0.38,
+          0,
+          Math.PI * 2
+        );
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
         ctx.fill();
       }
       ctx.restore();
@@ -351,10 +378,10 @@ export class HandRenderer {
 
       ctx.save();
       ctx.beginPath();
-      ctx.moveTo(seamX - 18 * scale, seamY - 20 * scale);
-      ctx.lineTo(endX, endY - 20 * scale);
-      ctx.lineTo(endX, endY + armWidth);
-      ctx.lineTo(seamX - 18 * scale, seamY + armWidth);
+      ctx.moveTo(seamX - 35 * scale, seamY - 30 * scale);
+      ctx.lineTo(endX, endY - 30 * scale);
+      ctx.lineTo(endX, endY + armWidth * 1.3);
+      ctx.lineTo(seamX - 35 * scale, seamY + armWidth);
       ctx.closePath();
 
       if (isShadow) {
@@ -367,6 +394,17 @@ export class HandRenderer {
         grad.addColorStop(1, config.skinColors.shadow);
         ctx.fillStyle = grad;
         ctx.fill();
+
+        // Dark artist sleeve continuation
+        const sleeveStartX = seamX + 80 * scale;
+        ctx.beginPath();
+        ctx.moveTo(sleeveStartX, seamY - 20 * scale);
+        ctx.lineTo(endX, endY - 30 * scale);
+        ctx.lineTo(endX, endY + armWidth * 1.3);
+        ctx.lineTo(sleeveStartX, seamY + armWidth + 10 * scale);
+        ctx.closePath();
+        ctx.fillStyle = '#1e2129';
+        ctx.fill();
       }
       ctx.restore();
     } else {
@@ -378,14 +416,14 @@ export class HandRenderer {
 
       const endY = seamY + extLength * 0.9;
       const endX1 = seamX1 + extLength * 0.35;
-      const endX2 = endX1 + armWidth * 1.1;
+      const endX2 = endX1 + armWidth * 1.25;
 
       ctx.save();
       ctx.beginPath();
-      ctx.moveTo(seamX1, seamY - 18 * scale);
+      ctx.moveTo(seamX1, seamY - 35 * scale);
       ctx.lineTo(endX1, endY);
       ctx.lineTo(endX2, endY);
-      ctx.lineTo(seamX2, seamY - 18 * scale);
+      ctx.lineTo(seamX2, seamY - 35 * scale);
       ctx.closePath();
 
       if (isShadow) {
@@ -398,9 +436,68 @@ export class HandRenderer {
         grad.addColorStop(1, config.skinColors.shadow);
         ctx.fillStyle = grad;
         ctx.fill();
+
+        // Dark artist sleeve continuation
+        const sleeveStartY = seamY + 80 * scale;
+        ctx.beginPath();
+        ctx.moveTo(seamX1 - 10 * scale, sleeveStartY);
+        ctx.lineTo(endX1, endY);
+        ctx.lineTo(endX2, endY);
+        ctx.lineTo(seamX2 + 10 * scale, sleeveStartY);
+        ctx.closePath();
+        ctx.fillStyle = '#1c1f26';
+        ctx.fill();
       }
       ctx.restore();
     }
+  }
+
+  /**
+   * Render feathered seam blend directly over the cut edge of the photographic asset
+   * to guarantee no hard rectangular edge is ever visible to the user.
+   */
+  private renderSeamBlend(
+    ctx: CanvasRenderingContext2D,
+    config: HandConfig,
+    scale: number,
+    wristOffsetX: number,
+    wristOffsetY: number
+  ) {
+    ctx.save();
+    if (config.cutEdge.type === 'right') {
+      const seamX = (1024 * scale) - wristOffsetX;
+      const seamY1 = (config.cutEdge.min * scale) - wristOffsetY;
+      const seamY2 = (config.cutEdge.max * scale) - wristOffsetY;
+
+      // Soft vertical feather band covering x = seamX - 25 to seamX + 25
+      const blend = ctx.createLinearGradient(seamX - 35 * scale, 0, seamX + 20 * scale, 0);
+      blend.addColorStop(0, 'rgba(163, 117, 87, 0)');
+      blend.addColorStop(0.55, 'rgba(163, 117, 87, 0.85)');
+      blend.addColorStop(1, 'rgba(35, 39, 47, 0.95)');
+
+      ctx.fillStyle = blend;
+      ctx.fillRect(seamX - 35 * scale, seamY1 - 15 * scale, 65 * scale, (seamY2 - seamY1) + 30 * scale);
+    } else if (config.cutEdge.type === 'top-right') {
+      const seamX = (1024 * scale) - wristOffsetX;
+      const seamY = (config.cutEdge.min * scale) - wristOffsetY;
+      const blend = ctx.createLinearGradient(seamX - 35 * scale, seamY - 20 * scale, seamX + 20 * scale, seamY + 20 * scale);
+      blend.addColorStop(0, 'rgba(150, 109, 81, 0)');
+      blend.addColorStop(0.5, 'rgba(150, 109, 81, 0.85)');
+      blend.addColorStop(1, 'rgba(30, 33, 41, 0.95)');
+      ctx.fillStyle = blend;
+      ctx.fillRect(seamX - 35 * scale, seamY - 25 * scale, 65 * scale, 320 * scale);
+    } else {
+      const seamY = (1024 * scale) - wristOffsetY;
+      const seamX1 = (config.cutEdge.min * scale) - wristOffsetX;
+      const seamX2 = (config.cutEdge.max * scale) - wristOffsetX;
+      const blend = ctx.createLinearGradient(0, seamY - 35 * scale, 0, seamY + 20 * scale);
+      blend.addColorStop(0, 'rgba(163, 121, 91, 0)');
+      blend.addColorStop(0.5, 'rgba(163, 121, 91, 0.85)');
+      blend.addColorStop(1, 'rgba(28, 31, 38, 0.95)');
+      ctx.fillStyle = blend;
+      ctx.fillRect(seamX1 - 15 * scale, seamY - 35 * scale, (seamX2 - seamX1) + 30 * scale, 65 * scale);
+    }
+    ctx.restore();
   }
 }
 
