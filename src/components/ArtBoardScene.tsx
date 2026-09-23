@@ -312,12 +312,12 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
       <div
         ref={cameraFrameRef}
         id="studio-camera-frame"
-        className="relative z-20 flex items-center justify-center w-full max-w-[1240px] h-full max-h-[92vh] overflow-hidden p-4 md:p-6"
+        className="relative z-20 flex items-center justify-center w-full max-w-[780px] h-full max-h-[92vh] overflow-hidden p-3 md:p-4"
       >
         {/* Wooden Drafting Art Board */}
         <div
           id="drafting-board"
-          className="relative flex items-center justify-center p-6 md:p-10 rounded-xl shadow-2xl transition-all duration-300"
+          className="relative flex items-center justify-center p-4 md:p-6 rounded-xl shadow-2xl transition-all duration-300"
           style={{
             backgroundColor: '#3d2c1e',
             backgroundImage: `linear-gradient(135deg, rgba(255, 255, 255, 0.07) 0%, rgba(0, 0, 0, 0.42) 100%)`,

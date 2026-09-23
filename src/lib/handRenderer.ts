@@ -17,8 +17,8 @@ const HAND_CONFIGS: Record<DrawingStyle, HandConfig> = {
     tipY: 868,
     wristX: 720,
     wristY: 380,
-    scale: 1.05,
-    baseAngle: -0.02
+    scale: 1.55,
+    baseAngle: 0.38
   },
   charcoal: {
     file: '/assets/hand_charcoal.png',
@@ -26,8 +26,8 @@ const HAND_CONFIGS: Record<DrawingStyle, HandConfig> = {
     tipY: 896,
     wristX: 780,
     wristY: 240,
-    scale: 1.05,
-    baseAngle: 0.04
+    scale: 1.55,
+    baseAngle: 0.38
   },
   fineliner: {
     file: '/assets/hand_fineliner.png',
@@ -35,14 +35,14 @@ const HAND_CONFIGS: Record<DrawingStyle, HandConfig> = {
     tipY: 899,
     wristX: 540,
     wristY: 680,
-    scale: 1.0,
-    baseAngle: 0.0
+    scale: 1.5,
+    baseAngle: 0.35
   }
 };
 
 export class HandRenderer {
   private images: Partial<Record<DrawingStyle, HTMLImageElement>> = {};
-  private currentAngle: number = 0;
+  private currentAngle: number = 0.38;
   private currentLift: number = 0;
   private loaded: boolean = false;
 
@@ -76,8 +76,8 @@ export class HandRenderer {
   }
 
   /**
-   * Render the realistic hand and pencil with strict tip synchronization.
-   * The forearm enters from outside the visible camera frame edge.
+   * Render the natural artist hand and pencil entering from the frame edge
+   * with exact pencil tip registration to the active drawing coordinate (x, y).
    */
   public render(
     ctx: CanvasRenderingContext2D,
@@ -87,7 +87,7 @@ export class HandRenderer {
     vx: number,
     vy: number,
     style: DrawingStyle,
-    time: number,
+    _time: number,
     paperScale: number = 1
   ) {
     const img = this.images[style] || this.images['pencil'];
@@ -98,27 +98,27 @@ export class HandRenderer {
     const canvasH = ctx.canvas.height;
 
     // 1. Off-screen wrist and forearm anchor kinematics
-    // The forearm enters from outside the bottom-right frame edge
-    const wristPivotX = canvasW * 1.25;
-    const wristPivotY = canvasH * 1.2;
+    // Forearm enters from beyond the bottom-right frame edge
+    const wristPivotX = canvasW * 1.35;
+    const wristPivotY = canvasH * 1.25;
 
     const armAngle = Math.atan2(y - wristPivotY, x - wristPivotX);
     const centerAngle = Math.atan2(canvasH * 0.5 - wristPivotY, canvasW * 0.5 - wristPivotX);
 
-    // Subtle anatomical sweep as the hand reaches across the paper
-    const sweepAngle = (armAngle - centerAngle) * 0.32;
+    // Subtle anatomical sweep as hand reaches across paper
+    const sweepAngle = (armAngle - centerAngle) * 0.22;
 
-    // Biomechanical wrist micro-flexion responding to drawing vector
+    // Biomechanical micro-flexion responding to drawing motion
     const speed = Math.hypot(vx, vy);
     const strokeAngle = Math.atan2(vy, vx);
     const wristDeflection =
-      speed > 6 ? Math.sin(strokeAngle - armAngle) * Math.min(0.045, speed * 0.00028) : 0;
+      speed > 6 ? Math.sin(strokeAngle - armAngle) * Math.min(0.035, speed * 0.0002) : 0;
 
     const targetAngle = config.baseAngle + sweepAngle + wristDeflection;
-    this.currentAngle += (targetAngle - this.currentAngle) * 0.16;
+    this.currentAngle += (targetAngle - this.currentAngle) * 0.2;
 
-    // 2. Strict Pencil Tip Synchronization
-    // When drawing, contact is 100% locked to (x, y): zero lift offset, zero delay.
+    // 2. Exact Pencil Tip Locking
+    // When drawing, contact is 100% locked to (x, y): zero lift offset, zero delay
     let handX: number;
     let handY: number;
 
@@ -127,9 +127,9 @@ export class HandRenderer {
       handX = x;
       handY = y;
     } else {
-      this.currentLift = Math.min(1.0, this.currentLift + 0.18);
-      const liftOffset = this.currentLift * 18 * paperScale;
-      handX = x + this.currentLift * 6 * paperScale;
+      this.currentLift = Math.min(1.0, this.currentLift + 0.16);
+      const liftOffset = this.currentLift * 14 * paperScale;
+      handX = x + this.currentLift * 4 * paperScale;
       handY = y - liftOffset;
     }
 
@@ -137,7 +137,7 @@ export class HandRenderer {
     const wristOffsetX = config.wristX * renderScale;
     const wristOffsetY = config.wristY * renderScale;
 
-    // Calculate rotation around wrist joint so tip lands at (handX, handY)
+    // Calculate rotation around wrist joint so pencil tip lands precisely at (handX, handY)
     const tipRelX = (config.tipX - config.wristX) * renderScale;
     const tipRelY = (config.tipY - config.wristY) * renderScale;
 
@@ -150,60 +150,27 @@ export class HandRenderer {
     const wristWorldX = handX - rotTipX;
     const wristWorldY = handY - rotTipY;
 
-    // -------------------------------------------------------------
-    // LAYER 1: Natural Ambient Cast Shadow
-    // Soft shadow cast by overhead studio lighting onto paper and board
-    // -------------------------------------------------------------
-    ctx.save();
-    const shadowDist = (8 + this.currentLift * 16) * paperScale;
-    const shadowBlur = (6 + this.currentLift * 12) * paperScale;
-    const shadowAlpha = Math.max(0.06, 0.28 - this.currentLift * 0.14);
-
-    ctx.translate(wristWorldX + shadowDist * 0.75, wristWorldY + shadowDist * 0.85);
-    ctx.rotate(this.currentAngle + 0.015);
-    ctx.filter = `blur(${shadowBlur}px)`;
-    ctx.globalAlpha = shadowAlpha;
-
-    ctx.drawImage(
-      img,
-      -wristOffsetX,
-      -wristOffsetY,
-      img.naturalWidth * renderScale,
-      img.naturalHeight * renderScale
-    );
-    ctx.restore();
-
-    // -------------------------------------------------------------
-    // LAYER 2: Crisp Pencil Lead Contact Point Shadow
-    // Directly under the lead tip when in contact with the paper
-    // -------------------------------------------------------------
-    ctx.save();
-    const tipShadowAlpha = isDrawing ? 0.8 : Math.max(0, 0.4 - this.currentLift * 0.4);
-    if (tipShadowAlpha > 0.05) {
-      const tipShadowDist = (1.2 + this.currentLift * 10) * paperScale;
-      const radius = (3.0 + this.currentLift * 5) * paperScale;
-      const grad = ctx.createRadialGradient(
-        handX + tipShadowDist,
-        handY + tipShadowDist * 0.85,
-        0,
-        handX + tipShadowDist,
-        handY + tipShadowDist * 0.85,
-        radius
+    // Subtle contact point shadow under pencil tip when in active contact
+    if (isDrawing) {
+      ctx.save();
+      const dotGrad = ctx.createRadialGradient(
+        handX + 1.2 * paperScale,
+        handY + 1.2 * paperScale,
+        0.5 * paperScale,
+        handX + 1.2 * paperScale,
+        handY + 1.2 * paperScale,
+        4.5 * paperScale
       );
-      grad.addColorStop(0, `rgba(30, 26, 22, ${tipShadowAlpha})`);
-      grad.addColorStop(1, 'rgba(30, 26, 22, 0)');
-
-      ctx.fillStyle = grad;
+      dotGrad.addColorStop(0, 'rgba(20, 18, 16, 0.45)');
+      dotGrad.addColorStop(1, 'rgba(20, 18, 16, 0)');
+      ctx.fillStyle = dotGrad;
       ctx.beginPath();
-      ctx.arc(handX + tipShadowDist, handY + tipShadowDist * 0.85, radius, 0, Math.PI * 2);
+      ctx.arc(handX + 1.2 * paperScale, handY + 1.2 * paperScale, 4.5 * paperScale, 0, Math.PI * 2);
       ctx.fill();
+      ctx.restore();
     }
-    ctx.restore();
 
-    // -------------------------------------------------------------
-    // LAYER 3: Photographic Hand & Pencil
-    // Forearm enters from frame edge; pencil tip locked to graphite mark
-    // -------------------------------------------------------------
+    // Render the artist hand + pencil
     ctx.save();
     ctx.translate(wristWorldX, wristWorldY);
     ctx.rotate(this.currentAngle);

@@ -28,15 +28,23 @@ interface Point2D {
 }
 
 // -------------------------------------------------------------
-// GEOMETRIC & CURVE SMOOTHING UTILITIES
+// GEOMETRIC & CURVE SIMPLIFICATION UTILITIES
 // -------------------------------------------------------------
 
 function dist(p1: Point2D, p2: Point2D): number {
   return Math.hypot(p1.x - p2.x, p1.y - p2.y);
 }
 
+function pathLength(pts: Point2D[]): number {
+  let len = 0;
+  for (let i = 1; i < pts.length; i++) {
+    len += dist(pts[i], pts[i - 1]);
+  }
+  return len;
+}
+
 /**
- * Ramer-Douglas-Peucker line simplification algorithm
+ * Ramer-Douglas-Peucker line simplification
  */
 function rdp(pts: Point2D[], eps: number): Point2D[] {
   if (pts.length <= 2) return pts;
@@ -82,7 +90,6 @@ function smoothPoints(pts: Point2D[]): Point2D[] {
     const p2 = pts[i + 1];
     const p3 = pts[Math.min(pts.length - 1, i + 2)];
 
-    // Subdivide into 3 micro-segments
     for (let t = 0.33; t <= 0.67; t += 0.34) {
       const t2 = t * t;
       const t3 = t2 * t;
@@ -105,56 +112,50 @@ function smoothPoints(pts: Point2D[]): Point2D[] {
   return res;
 }
 
-/**
- * Compute total arc length of a sequence of points
- */
-function computePathLength(pts: StrokePoint[]): number {
-  let len = 0;
-  for (let i = 1; i < pts.length; i++) {
-    len += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
-  }
-  return len;
-}
+// -------------------------------------------------------------
+// SEPARABLE 1D GAUSSIAN BLUR
+// -------------------------------------------------------------
 
-/**
- * Separable 1D Gaussian blur for image luminance
- */
-function gaussianBlur(src: Float32Array, w: number, h: number, sigma: number): Float32Array {
+function gaussianBlur(
+  src: Float32Array,
+  w: number,
+  h: number,
+  sigma: number
+): Float32Array {
   const dst = new Float32Array(w * h);
   const tmp = new Float32Array(w * h);
-  const kRadius = Math.ceil(sigma * 2.5);
+  const radius = Math.ceil(sigma * 2.5);
   const kernel: number[] = [];
-  let kSum = 0;
-
-  for (let i = -kRadius; i <= kRadius; i++) {
+  let sum = 0;
+  for (let i = -radius; i <= radius; i++) {
     const v = Math.exp(-(i * i) / (2 * sigma * sigma));
     kernel.push(v);
-    kSum += v;
+    sum += v;
   }
-  for (let i = 0; i < kernel.length; i++) kernel[i] /= kSum;
+  for (let i = 0; i < kernel.length; i++) kernel[i] /= sum;
 
-  // Horizontal blur pass
+  // Horizontal pass
   for (let y = 0; y < h; y++) {
     const row = y * w;
     for (let x = 0; x < w; x++) {
-      let sum = 0;
-      for (let k = -kRadius; k <= kRadius; k++) {
+      let acc = 0;
+      for (let k = -radius; k <= radius; k++) {
         const px = Math.min(w - 1, Math.max(0, x + k));
-        sum += src[row + px] * kernel[k + kRadius];
+        acc += src[row + px] * kernel[k + radius];
       }
-      tmp[row + x] = sum;
+      tmp[row + x] = acc;
     }
   }
 
-  // Vertical blur pass
+  // Vertical pass
   for (let x = 0; x < w; x++) {
     for (let y = 0; y < h; y++) {
-      let sum = 0;
-      for (let k = -kRadius; k <= kRadius; k++) {
+      let acc = 0;
+      for (let k = -radius; k <= radius; k++) {
         const py = Math.min(h - 1, Math.max(0, y + k));
-        sum += tmp[py * w + x] * kernel[k + kRadius];
+        acc += tmp[py * w + x] * kernel[k + radius];
       }
-      dst[y * w + x] = sum;
+      dst[y * w + x] = acc;
     }
   }
 
@@ -162,7 +163,106 @@ function gaussianBlur(src: Float32Array, w: number, h: number, sigma: number): F
 }
 
 // -------------------------------------------------------------
-// MAIN PORTRAIT SKETCH GENERATION PIPELINE
+// ZHANG-SUEN MORPHOLOGICAL THINNING (SKELETONIZATION)
+// -------------------------------------------------------------
+
+function zhangSuenThinning(bin: Uint8Array, w: number, h: number): Uint8Array {
+  const img = new Uint8Array(bin);
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+    const step1: number[] = [];
+
+    for (let y = 1; y < h - 1; y++) {
+      const row = y * w;
+      for (let x = 1; x < w - 1; x++) {
+        const idx = row + x;
+        if (img[idx] !== 1) continue;
+
+        const p2 = img[idx - w];
+        const p3 = img[idx - w + 1];
+        const p4 = img[idx + 1];
+        const p5 = img[idx + w + 1];
+        const p6 = img[idx + w];
+        const p7 = img[idx + w - 1];
+        const p8 = img[idx - 1];
+        const p9 = img[idx - w - 1];
+
+        const b = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+        if (b < 2 || b > 6) continue;
+
+        let a = 0;
+        if (p2 === 0 && p3 === 1) a++;
+        if (p3 === 0 && p4 === 1) a++;
+        if (p4 === 0 && p5 === 1) a++;
+        if (p5 === 0 && p6 === 1) a++;
+        if (p6 === 0 && p7 === 1) a++;
+        if (p7 === 0 && p8 === 1) a++;
+        if (p8 === 0 && p9 === 1) a++;
+        if (p9 === 0 && p2 === 1) a++;
+        if (a !== 1) continue;
+
+        if (p2 * p4 * p6 !== 0) continue;
+        if (p4 * p6 * p8 !== 0) continue;
+
+        step1.push(idx);
+      }
+    }
+
+    for (const idx of step1) {
+      img[idx] = 0;
+      changed = true;
+    }
+
+    const step2: number[] = [];
+    for (let y = 1; y < h - 1; y++) {
+      const row = y * w;
+      for (let x = 1; x < w - 1; x++) {
+        const idx = row + x;
+        if (img[idx] !== 1) continue;
+
+        const p2 = img[idx - w];
+        const p3 = img[idx - w + 1];
+        const p4 = img[idx + 1];
+        const p5 = img[idx + w + 1];
+        const p6 = img[idx + w];
+        const p7 = img[idx + w - 1];
+        const p8 = img[idx - 1];
+        const p9 = img[idx - w - 1];
+
+        const b = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+        if (b < 2 || b > 6) continue;
+
+        let a = 0;
+        if (p2 === 0 && p3 === 1) a++;
+        if (p3 === 0 && p4 === 1) a++;
+        if (p4 === 0 && p5 === 1) a++;
+        if (p5 === 0 && p6 === 1) a++;
+        if (p6 === 0 && p7 === 1) a++;
+        if (p7 === 0 && p8 === 1) a++;
+        if (p8 === 0 && p9 === 1) a++;
+        if (p9 === 0 && p2 === 1) a++;
+        if (a !== 1) continue;
+
+        if (p2 * p4 * p8 !== 0) continue;
+        if (p2 * p6 * p8 !== 0) continue;
+
+        step2.push(idx);
+      }
+    }
+
+    for (const idx of step2) {
+      img[idx] = 0;
+      changed = true;
+    }
+  }
+
+  return img;
+}
+
+// -------------------------------------------------------------
+// MASTER PROCESSOR: CLEAN LINE-ART PORTRAIT PIPELINE
 // -------------------------------------------------------------
 
 export async function processImageToDrawing(
@@ -202,466 +302,289 @@ export async function processImageToDrawing(
   const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight);
   const pixels = imgData.data;
 
-  // 1. Grayscale luminance extraction
+  // 1. Grayscale luminance extraction (ITU-R BT.601)
   const gray = new Float32Array(targetWidth * targetHeight);
   for (let i = 0; i < pixels.length; i += 4) {
-    gray[i / 4] = 0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2];
+    gray[i / 4] = (0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2]) / 255.0;
   }
 
-  // 2. Pre-smoothing: eliminate photographic grain, sensor noise, and micro skin pores
-  // while preserving primary facial contours (eyes, lips, jawline, hair silhouette)
-  const smoothed = gaussianBlur(gray, targetWidth, targetHeight, 1.8);
+  // 2. Multi-Scale Difference of Gaussians (DoG) for Anatomical Line Art
+  // Scale 1 (Fine): isolates facial features (eyes, irises, eyelids, eyebrows, nostril base, lip line)
+  const g1_fine = gaussianBlur(gray, targetWidth, targetHeight, 1.2);
+  const g2_fine = gaussianBlur(gray, targetWidth, targetHeight, 2.8);
 
-  // 3. Sobel gradient magnitude & direction
-  const mag = new Float32Array(targetWidth * targetHeight);
-  const dir = new Float32Array(targetWidth * targetHeight);
+  // Scale 2 (Broad): isolates outer silhouette, hair outline, jawline, ears, neck, shoulders
+  const g1_broad = gaussianBlur(gray, targetWidth, targetHeight, 2.6);
+  const g2_broad = gaussianBlur(gray, targetWidth, targetHeight, 6.2);
 
-  for (let y = 1; y < targetHeight - 1; y++) {
-    const row = y * targetWidth;
-    for (let x = 1; x < targetWidth - 1; x++) {
-      const idx = row + x;
-      const gx =
-        -1 * smoothed[idx - targetWidth - 1] +
-        1 * smoothed[idx - targetWidth + 1] +
-        -2 * smoothed[idx - 1] +
-        2 * smoothed[idx + 1] +
-        -1 * smoothed[idx + targetWidth - 1] +
-        1 * smoothed[idx + targetWidth + 1];
-      const gy =
-        -1 * smoothed[idx - targetWidth - 1] -
-        2 * smoothed[idx - targetWidth] -
-        1 * smoothed[idx - targetWidth + 1] +
-        1 * smoothed[idx + targetWidth - 1] +
-        2 * smoothed[idx + targetWidth] +
-        1 * smoothed[idx + targetWidth + 1];
+  const binary = new Uint8Array(targetWidth * targetHeight);
+  for (let i = 0; i < gray.length; i++) {
+    const dFine = g1_fine[i] - 0.98 * g2_fine[i];
+    const dBroad = g1_broad[i] - 0.97 * g2_broad[i];
 
-      mag[idx] = Math.hypot(gx, gy);
-      dir[idx] = Math.atan2(gy, gx);
+    if (dFine < -0.012 || dBroad < -0.018) {
+      binary[i] = 1;
     }
   }
 
-  // 4. Non-Maximum Suppression (NMS) for crisp 1-pixel ridges
-  const nms = new Float32Array(targetWidth * targetHeight);
-  for (let y = 2; y < targetHeight - 2; y++) {
-    const row = y * targetWidth;
-    for (let x = 2; x < targetWidth - 2; x++) {
-      const idx = row + x;
-      const m = mag[idx];
-      if (m < 14) continue;
+  // 3. Morphological Skeletonization: Reduce lines to strictly 1-pixel centerlines
+  const thinned = zhangSuenThinning(binary, targetWidth, targetHeight);
 
-      let angle = dir[idx] * (180 / Math.PI);
-      if (angle < 0) angle += 180;
-
-      let m1 = 0;
-      let m2 = 0;
-      if ((angle >= 0 && angle < 22.5) || (angle >= 157.5 && angle <= 180)) {
-        m1 = mag[idx - 1];
-        m2 = mag[idx + 1];
-      } else if (angle >= 22.5 && angle < 67.5) {
-        m1 = mag[idx - targetWidth + 1];
-        m2 = mag[idx + targetWidth - 1];
-      } else if (angle >= 67.5 && angle < 112.5) {
-        m1 = mag[idx - targetWidth];
-        m2 = mag[idx + targetWidth];
-      } else {
-        m1 = mag[idx - targetWidth - 1];
-        m2 = mag[idx + targetWidth + 1];
-      }
-
-      if (m >= m1 && m >= m2) {
-        nms[idx] = m;
-      }
-    }
-  }
-
-  // 5. Dual-Threshold Hysteresis for clear portrait contours
-  const highThreshold = 26;
-  const lowThreshold = 13;
-  const edgeType = new Uint8Array(targetWidth * targetHeight);
-  for (let i = 0; i < nms.length; i++) {
-    if (nms[i] >= highThreshold) edgeType[i] = 2;
-    else if (nms[i] >= lowThreshold) edgeType[i] = 1;
-  }
-
-  const edgeFinal = new Uint8Array(targetWidth * targetHeight);
-  const queue: number[] = [];
-  for (let y = 1; y < targetHeight - 1; y++) {
-    const row = y * targetWidth;
-    for (let x = 1; x < targetWidth - 1; x++) {
-      const idx = row + x;
-      if (edgeType[idx] === 2) {
-        edgeFinal[idx] = 1;
-        queue.push(idx);
-      }
-    }
-  }
-
-  const dxy = [
-    -targetWidth - 1,
-    -targetWidth,
-    -targetWidth + 1,
-    -1,
-    1,
-    targetWidth - 1,
-    targetWidth,
-    targetWidth + 1
-  ];
-  let head = 0;
-  while (head < queue.length) {
-    const curr = queue[head++];
-    for (let d = 0; d < 8; d++) {
-      const n = curr + dxy[d];
-      if (n >= 0 && n < edgeType.length && edgeType[n] === 1 && edgeFinal[n] === 0) {
-        edgeFinal[n] = 1;
-        queue.push(n);
-      }
-    }
-  }
-
-  // 6. Bidirectional ridge tracking starting from dominant seeds
+  // 4. Graph Path Tracing: Trace continuous paths from endpoints first
   const visited = new Uint8Array(targetWidth * targetHeight);
-  const seeds: { idx: number; mag: number }[] = [];
-  for (let i = 0; i < edgeFinal.length; i++) {
-    if (edgeFinal[i] === 1) seeds.push({ idx: i, mag: mag[i] });
+  const degree = new Uint8Array(targetWidth * targetHeight);
+
+  for (let y = 1; y < targetHeight - 1; y++) {
+    const row = y * targetWidth;
+    for (let x = 1; x < targetWidth - 1; x++) {
+      const idx = row + x;
+      if (thinned[idx] !== 1) continue;
+      let d = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          if (thinned[(y + dy) * targetWidth + (x + dx)] === 1) d++;
+        }
+      }
+      degree[idx] = d;
+    }
   }
-  seeds.sort((a, b) => b.mag - a.mag);
 
-  const rawChains: Point2D[][] = [];
-  for (const seed of seeds) {
-    if (visited[seed.idx] === 1) continue;
-    const sy = Math.floor(seed.idx / targetWidth);
-    const sx = seed.idx % targetWidth;
-    visited[seed.idx] = 1;
+  function tracePath(startIdx: number): Point2D[] {
+    const path: Point2D[] = [];
+    let curr = startIdx;
+    visited[curr] = 1;
+    let cx = curr % targetWidth;
+    let cy = Math.floor(curr / targetWidth);
+    path.push({ x: cx, y: cy });
 
-    const track = (startX: number, startY: number): Point2D[] => {
-      const pts: Point2D[] = [];
-      let cx = startX;
-      let cy = startY;
-      while (true) {
-        let bestNx = -1;
-        let bestNy = -1;
-        let bestMag = -1;
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            if (dx === 0 && dy === 0) continue;
-            const nx = cx + dx;
-            const ny = cy + dy;
-            if (nx >= 2 && nx < targetWidth - 2 && ny >= 2 && ny < targetHeight - 2) {
-              const nidx = ny * targetWidth + nx;
-              if (edgeFinal[nidx] === 1 && visited[nidx] === 0) {
-                if (mag[nidx] > bestMag) {
-                  bestMag = mag[nidx];
-                  bestNx = nx;
-                  bestNy = ny;
-                }
-              }
+    while (true) {
+      let nextIdx = -1;
+      let nx = -1;
+      let ny = -1;
+
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const px = cx + dx;
+          const py = cy + dy;
+          if (px >= 0 && px < targetWidth && py >= 0 && py < targetHeight) {
+            const nidx = py * targetWidth + px;
+            if (thinned[nidx] === 1 && visited[nidx] === 0) {
+              nextIdx = nidx;
+              nx = px;
+              ny = py;
+              break;
             }
           }
         }
-        if (bestNx !== -1) {
-          const nidx = bestNy * targetWidth + bestNx;
-          visited[nidx] = 1;
-          cx = bestNx;
-          cy = bestNy;
-          pts.push({ x: cx, y: cy });
-        } else {
-          break;
-        }
+        if (nextIdx !== -1) break;
       }
-      return pts;
-    };
 
-    const branch1 = track(sx, sy);
-    const branch2 = track(sx, sy);
-    branch2.reverse();
-    const full = branch2.concat([{ x: sx, y: sy }], branch1);
-    if (full.length >= 14) {
-      rawChains.push(full);
+      if (nextIdx !== -1) {
+        visited[nextIdx] = 1;
+        cx = nx;
+        cy = ny;
+        path.push({ x: cx, y: cy });
+      } else {
+        break;
+      }
+    }
+    return path;
+  }
+
+  const rawPaths: Point2D[][] = [];
+  // Trace endpoints first (degree === 1)
+  for (let i = 0; i < thinned.length; i++) {
+    if (thinned[i] === 1 && degree[i] === 1 && visited[i] === 0) {
+      const p = tracePath(i);
+      if (p.length >= 8) rawPaths.push(p);
+    }
+  }
+  // Trace any remaining closed contours (loops)
+  for (let i = 0; i < thinned.length; i++) {
+    if (thinned[i] === 1 && visited[i] === 0) {
+      const p = tracePath(i);
+      if (p.length >= 8) rawPaths.push(p);
     }
   }
 
-  // 7. Collinear endpoint consolidation (join broken jawline, eyebrow, lip, and eye segments)
-  const activeChains = rawChains.map((pts, i) => ({ id: i, points: pts, active: true }));
-  let merged = true;
-  while (merged) {
-    merged = false;
-    for (let i = 0; i < activeChains.length; i++) {
-      const A = activeChains[i];
+  // 5. Collinear Segment Stitching: Join nearby endpoints into single fluid artist strokes
+  const activePaths = rawPaths.map((pts, id) => ({ id, pts, active: true }));
+  let joined = true;
+  while (joined) {
+    joined = false;
+    for (let i = 0; i < activePaths.length; i++) {
+      const A = activePaths[i];
       if (!A.active) continue;
-      const tailA = A.points[A.points.length - 1];
+      const tailA = A.pts[A.pts.length - 1];
       let bestJ = -1;
-      let bestDist = 22;
-      let reverseB = false;
+      let bestDist = 16;
+      let revB = false;
 
-      for (let j = 0; j < activeChains.length; j++) {
+      for (let j = 0; j < activePaths.length; j++) {
         if (i === j) continue;
-        const B = activeChains[j];
+        const B = activePaths[j];
         if (!B.active) continue;
 
-        const d1 = dist(tailA, B.points[0]);
+        const d1 = dist(tailA, B.pts[0]);
         if (d1 < bestDist) {
           bestDist = d1;
           bestJ = j;
-          reverseB = false;
+          revB = false;
         }
-        const d2 = dist(tailA, B.points[B.points.length - 1]);
+        const d2 = dist(tailA, B.pts[B.pts.length - 1]);
         if (d2 < bestDist) {
           bestDist = d2;
           bestJ = j;
-          reverseB = true;
+          revB = true;
         }
       }
 
       if (bestJ !== -1) {
-        const B = activeChains[bestJ];
+        const B = activePaths[bestJ];
         B.active = false;
-        const bPts = reverseB ? [...B.points].reverse() : B.points;
-        A.points = A.points.concat(bPts);
-        merged = true;
+        const bPts = revB ? [...B.pts].reverse() : B.pts;
+        A.pts = A.pts.concat(bPts);
+        joined = true;
         break;
       }
     }
   }
 
-  const mergedChains = activeChains
-    .filter((c) => c.active && c.points.length >= 16)
-    .map((c) => c.points);
+  // 6. RDP Line Simplification & Catmull-Rom Smoothing
+  let cleanPaths = activePaths
+    .filter((a) => a.active)
+    .map((a) => smoothPoints(rdp(a.pts, 1.4)))
+    .filter((a) => pathLength(a) >= 18);
 
-  // 8. Intentional Form Shading: Identify 3 to 4 major anatomical shadow regions
-  // (e.g. neck/under-chin shadow, eye sockets, hair shadow mass, cheek shadow)
-  const shadowMask = new Uint8Array(targetWidth * targetHeight);
-  const shadowBlur = gaussianBlur(gray, targetWidth, targetHeight, 4.0);
-  for (let i = 0; i < shadowBlur.length; i++) {
-    if (shadowBlur[i] < 95) shadowMask[i] = 1;
-  }
+  // Sort paths by length descending
+  cleanPaths.sort((a, b) => pathLength(b) - pathLength(a));
 
-  const shadowVisited = new Uint8Array(targetWidth * targetHeight);
-  interface ShadowRegion {
-    minX: number;
-    maxX: number;
-    minY: number;
-    maxY: number;
-    count: number;
-  }
-  const shadowRegions: ShadowRegion[] = [];
+  // Cap to target 30–80 meaningful paths (target ~50–65 paths)
+  cleanPaths = cleanPaths.slice(0, 60);
 
-  for (let y = 10; y < targetHeight - 10; y += 4) {
-    for (let x = 10; x < targetWidth - 10; x += 4) {
-      const idx = y * targetWidth + x;
-      if (shadowMask[idx] === 1 && shadowVisited[idx] === 0) {
-        const q = [idx];
-        shadowVisited[idx] = 1;
-        let count = 0;
-        let minX = x;
-        let maxX = x;
-        let minY = y;
-        let maxY = y;
-
-        while (q.length > 0 && count < 5000) {
-          const curr = q.pop()!;
-          count++;
-          const cy = Math.floor(curr / targetWidth);
-          const cx = curr % targetWidth;
-          if (cx < minX) minX = cx;
-          if (cx > maxX) maxX = cx;
-          if (cy < minY) minY = cy;
-          if (cy > maxY) maxY = cy;
-
-          for (const [dx, dy] of [
-            [-4, 0],
-            [4, 0],
-            [0, -4],
-            [0, 4]
-          ]) {
-            const nx = cx + dx;
-            const ny = cy + dy;
-            if (nx >= 0 && nx < targetWidth && ny >= 0 && ny < targetHeight) {
-              const nidx = ny * targetWidth + nx;
-              if (shadowMask[nidx] === 1 && shadowVisited[nidx] === 0) {
-                shadowVisited[nidx] = 1;
-                q.push(nidx);
-              }
-            }
-          }
-        }
-
-        if (count >= 400 && maxX - minX > 40 && maxY - minY > 30) {
-          shadowRegions.push({ minX, maxX, minY, maxY, count });
-        }
-      }
-    }
-  }
-
-  shadowRegions.sort((a, b) => b.count - a.count);
-  const topShadows = shadowRegions.slice(0, 4); // Limit to top 4 major shadow masses only
-
-  // Create 3 to 5 parallel rhythmic artist shading strokes per shadow mass (-35° angle)
-  const intentionalShadingChains: Point2D[][] = [];
-  const hatchAngle = -35 * (Math.PI / 180);
-  const cosH = Math.cos(hatchAngle);
-  const sinH = Math.sin(hatchAngle);
-  const perpX = -sinH;
-  const perpY = cosH;
-
-  for (const reg of topShadows) {
-    const cx = (reg.minX + reg.maxX) / 2;
-    const cy = (reg.minY + reg.maxY) / 2;
-    const span = Math.max(reg.maxX - reg.minX, reg.maxY - reg.minY);
-    const strokeCount = Math.min(5, Math.max(3, Math.floor(span / 32)));
-    const spacing = 16;
-    const half = (strokeCount - 1) * spacing * 0.5;
-
-    for (let s = 0; s < strokeCount; s++) {
-      const offset = -half + s * spacing;
-      const lineCenter = { x: cx + perpX * offset, y: cy + perpY * offset };
-      const halfLen = span * 0.42;
-      const p1 = { x: lineCenter.x - cosH * halfLen, y: lineCenter.y - sinH * halfLen };
-      const p2 = { x: lineCenter.x + cosH * halfLen, y: lineCenter.y + sinH * halfLen };
-
-      const strokePts: Point2D[] = [];
-      for (let step = 0; step <= 8; step++) {
-        const t = step / 8;
-        const px = Math.round(p1.x + (p2.x - p1.x) * t);
-        const py = Math.round(p1.y + (p2.y - p1.y) * t);
-        if (px >= 0 && px < targetWidth && py >= 0 && py < targetHeight) {
-          strokePts.push({ x: px, y: py });
-        }
-      }
-      if (strokePts.length >= 4) {
-        intentionalShadingChains.push(strokePts);
-      }
-    }
-  }
-
-  // 9. Process and classify strokes into the 6 authentic drawing phases
-  // Simplify and smooth all contour lines
-  const simplifiedContours = mergedChains.map((c) => smoothPoints(rdp(c, 1.6)));
-  // Sort contours by anatomical importance: outer boundary / length
-  simplifiedContours.sort((a, b) => b.length - a.length);
-
+  // -------------------------------------------------------------
+  // 7. ORCHESTRATE 6-PHASE AUTHENTIC ARTIST TIMELINE
+  // -------------------------------------------------------------
   const strokes: DrawingStroke[] = [];
   let strokeIdCounter = 0;
 
-  // Color & alpha setup
   const baseColor =
-    style === 'pencil' ? '#252220' : style === 'charcoal' ? '#141210' : '#080808';
+    style === 'pencil'
+      ? '#262421'
+      : style === 'charcoal'
+      ? '#141414'
+      : '#1a1816';
 
-  // PHASE 1: Primary Structural Anchors & Silhouette (5 to 7 longest foundational strokes)
-  const phase1Count = Math.min(6, Math.max(4, Math.floor(simplifiedContours.length * 0.1)));
+  // PHASE 1: Foundational Silhouettes (Top major boundary strokes)
+  const phase1Count = Math.min(5, Math.max(3, Math.floor(cleanPaths.length * 0.1)));
   for (let i = 0; i < phase1Count; i++) {
-    const raw = simplifiedContours[i];
-    const points: StrokePoint[] = raw.map((pt, idx) => ({
+    const p = cleanPaths[i];
+    const points: StrokePoint[] = p.map((pt, idx) => ({
       x: pt.x,
       y: pt.y,
-      pressure: 0.38 + 0.15 * Math.sin((idx / raw.length) * Math.PI)
+      pressure: 0.35 + 0.3 * Math.sin((idx / Math.max(1, p.length - 1)) * Math.PI)
     }));
+
     strokes.push({
       id: `stroke-${strokeIdCounter++}`,
       phase: 1,
-      phaseName: 'Foundation & Silhouette Anchors',
+      phaseName: 'Curiosity & Construction Marks',
       points,
       color: baseColor,
-      baseWidth: style === 'pencil' ? 1.4 : style === 'charcoal' ? 2.2 : 1.2,
-      alpha: 0.55,
+      baseWidth: style === 'pencil' ? 1.6 : style === 'charcoal' ? 2.4 : 1.3,
+      alpha: 0.7,
       style,
       isHatching: false,
-      length: computePathLength(points)
+      length: pathLength(points)
     });
   }
 
-  // PHASE 2: Head, Hairline & Outer Contours (Next ~20-25 strokes)
-  const phase2Count = Math.min(
-    22,
-    Math.max(12, Math.floor((simplifiedContours.length - phase1Count) * 0.4))
-  );
-  for (let i = phase1Count; i < phase1Count + phase2Count && i < simplifiedContours.length; i++) {
-    const raw = simplifiedContours[i];
-    const points: StrokePoint[] = raw.map((pt, idx) => ({
+  // PHASE 2: Hairline, Head Mass, Jawline, Neck, Shoulders
+  const phase2Count = Math.floor(cleanPaths.length * 0.28);
+  for (let i = phase1Count; i < phase1Count + phase2Count; i++) {
+    const p = cleanPaths[i];
+    const points: StrokePoint[] = p.map((pt, idx) => ({
       x: pt.x,
       y: pt.y,
-      pressure: 0.45 + 0.2 * Math.sin((idx / raw.length) * Math.PI)
+      pressure: 0.5 + 0.35 * Math.sin((idx / Math.max(1, p.length - 1)) * Math.PI)
     }));
+
     strokes.push({
       id: `stroke-${strokeIdCounter++}`,
       phase: 2,
-      phaseName: 'Head Structure & Silhouette Contours',
+      phaseName: 'Major Outlines & Proportions',
       points,
       color: baseColor,
-      baseWidth: style === 'pencil' ? 1.6 : style === 'charcoal' ? 2.6 : 1.3,
-      alpha: 0.72,
-      style,
-      isHatching: false,
-      length: computePathLength(points)
-    });
-  }
-
-  // PHASE 3: Expressive Facial Features (Eyes, Brows, Nose, Lips, Ears) (Remaining contours)
-  const remainingContours = simplifiedContours.slice(phase1Count + phase2Count);
-  // Sort spatially from eyes (top) down to mouth/chin for natural artist execution
-  remainingContours.sort((a, b) => {
-    const cyA = a.reduce((sum, p) => sum + p.y, 0) / a.length;
-    const cyB = b.reduce((sum, p) => sum + p.y, 0) / b.length;
-    return cyA - cyB;
-  });
-
-  for (const raw of remainingContours) {
-    const points: StrokePoint[] = raw.map((pt, idx) => ({
-      x: pt.x,
-      y: pt.y,
-      pressure: 0.55 + 0.25 * Math.sin((idx / raw.length) * Math.PI)
-    }));
-    strokes.push({
-      id: `stroke-${strokeIdCounter++}`,
-      phase: 3,
-      phaseName: 'Facial Features & Definition',
-      points,
-      color: baseColor,
-      baseWidth: style === 'pencil' ? 1.8 : style === 'charcoal' ? 2.8 : 1.4,
+      baseWidth: style === 'pencil' ? 2.0 : style === 'charcoal' ? 3.0 : 1.5,
       alpha: 0.85,
       style,
       isHatching: false,
-      length: computePathLength(points)
+      length: pathLength(points)
     });
   }
 
-  // PHASE 4: Intentional Form Shading (Clean rhythmic parallel gestures)
-  for (const raw of intentionalShadingChains) {
-    const points: StrokePoint[] = raw.map((pt) => ({
+  // PHASE 3: Facial Features (Eyes, Eyebrows, Nose, Lips)
+  const phase3Count = Math.floor(cleanPaths.length * 0.32);
+  const phase3Start = phase1Count + phase2Count;
+  for (let i = phase3Start; i < phase3Start + phase3Count; i++) {
+    const p = cleanPaths[i];
+    const points: StrokePoint[] = p.map((pt, idx) => ({
       x: pt.x,
       y: pt.y,
-      pressure: 0.42
+      pressure: 0.55 + 0.35 * Math.sin((idx / Math.max(1, p.length - 1)) * Math.PI)
     }));
+
+    strokes.push({
+      id: `stroke-${strokeIdCounter++}`,
+      phase: 3,
+      phaseName: 'Features, Contour & Anatomy',
+      points,
+      color: baseColor,
+      baseWidth: style === 'pencil' ? 1.8 : style === 'charcoal' ? 2.8 : 1.4,
+      alpha: 0.9,
+      style,
+      isHatching: false,
+      length: pathLength(points)
+    });
+  }
+
+  // PHASE 4: Secondary Character Lines & Key Shadow Boundaries
+  const phase4Start = phase3Start + phase3Count;
+  const phase4Count = Math.floor(cleanPaths.length * 0.2);
+  for (let i = phase4Start; i < phase4Start + phase4Count; i++) {
+    const p = cleanPaths[i];
+    const points: StrokePoint[] = p.map((pt, idx) => ({
+      x: pt.x,
+      y: pt.y,
+      pressure: 0.45 + 0.3 * Math.sin((idx / Math.max(1, p.length - 1)) * Math.PI)
+    }));
+
     strokes.push({
       id: `stroke-${strokeIdCounter++}`,
       phase: 4,
-      phaseName: 'Intentional Form Shading',
+      phaseName: 'Tonal Contours & Key Shadow Boundaries',
       points,
       color: baseColor,
-      baseWidth: style === 'pencil' ? 1.2 : style === 'charcoal' ? 2.0 : 1.0,
-      alpha: 0.48,
+      baseWidth: style === 'pencil' ? 1.7 : style === 'charcoal' ? 2.6 : 1.3,
+      alpha: 0.82,
       style,
-      isHatching: true,
-      length: computePathLength(points)
+      isHatching: false,
+      length: pathLength(points)
     });
   }
 
-  // PHASE 5: Deep Contrast Accents & Precision Highlights
-  // Select 6-8 sharpest facial accents (deep eye pupil centers, lip parting crease, deep nostrils)
-  const accentCount = Math.min(8, Math.max(4, Math.floor(remainingContours.length * 0.25)));
-  for (let i = 0; i < accentCount; i++) {
-    const srcContour = remainingContours[i % remainingContours.length];
-    if (!srcContour || srcContour.length < 4) continue;
-    // Extract a focused focal segment
-    const startIdx = Math.floor(srcContour.length * 0.25);
-    const endIdx = Math.floor(srcContour.length * 0.75);
-    const accentPts = srcContour.slice(startIdx, endIdx);
-    if (accentPts.length < 3) continue;
-
-    const points: StrokePoint[] = accentPts.map((pt) => ({
+  // PHASE 5: Deep Contrast Accents & Precision Eye Highlights
+  const phase5Start = phase4Start + phase4Count;
+  for (let i = phase5Start; i < cleanPaths.length; i++) {
+    const p = cleanPaths[i];
+    const points: StrokePoint[] = p.map((pt) => ({
       x: pt.x,
       y: pt.y,
-      pressure: 0.88
+      pressure: 0.85
     }));
+
     strokes.push({
       id: `stroke-${strokeIdCounter++}`,
       phase: 5,
@@ -672,7 +595,7 @@ export async function processImageToDrawing(
       alpha: 0.95,
       style,
       isHatching: false,
-      length: computePathLength(points)
+      length: pathLength(points)
     });
   }
 
@@ -693,11 +616,11 @@ export async function processImageToDrawing(
     phaseName: 'Artist Signature',
     points: sigPoints,
     color: baseColor,
-    baseWidth: style === 'pencil' ? 1.5 : 2.0,
-    alpha: 0.75,
+    baseWidth: style === 'pencil' ? 1.6 : 2.0,
+    alpha: 0.78,
     style,
     isHatching: false,
-    length: computePathLength(sigPoints)
+    length: pathLength(sigPoints)
   });
 
   // Calculate metrics
