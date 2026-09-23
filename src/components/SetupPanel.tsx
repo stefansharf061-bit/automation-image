@@ -73,16 +73,14 @@ export const SetupPanel: React.FC<SetupPanelProps> = ({ onGenerateComplete }) =>
 
     try {
       setProcessStep('Loading photo into browser memory...');
-      const img = await loadImage(selectedImage);
-
-      setProcessStep('Analyzing contours, edges, and tonal values...');
       // Small timeout to allow UI update
       await new Promise(r => setTimeout(r, 60));
 
-      setProcessStep('Synthesizing 6-phase artistic hand-drawing timeline...');
+      setProcessStep('Analyzing contours, edges, and tonal values...');
       await new Promise(r => setTimeout(r, 60));
 
-      const drawingData = processImageToDrawing(img, style);
+      setProcessStep('Synthesizing 6-phase artistic hand-drawing timeline...');
+      const drawingData = await processImageToDrawing(selectedImage, style);
 
       setProcessStep('Preparing physical art board scene...');
       await new Promise(r => setTimeout(r, 100));

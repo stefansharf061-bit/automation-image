@@ -21,6 +21,7 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
   onBackToSetup
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const cameraFrameRef = useRef<HTMLDivElement>(null);
   const paperSheetRef = useRef<HTMLDivElement>(null);
   const paperCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -51,8 +52,9 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
 
   // Update exact screen geometry and coordinate mapping between paper and overlay canvas
   const updateCanvasesGeometry = () => {
-    if (!containerRef.current || !paperSheetRef.current || !overlayCanvasRef.current) return;
-    const containerRect = containerRef.current.getBoundingClientRect();
+    const frameEl = cameraFrameRef.current || containerRef.current;
+    if (!frameEl || !paperSheetRef.current || !overlayCanvasRef.current) return;
+    const containerRect = frameEl.getBoundingClientRect();
     const paperRect = paperSheetRef.current.getBoundingClientRect();
 
     if (containerRect.width > 0 && containerRect.height > 0) {
@@ -84,6 +86,7 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
     });
 
     if (containerRef.current) observer.observe(containerRef.current);
+    if (cameraFrameRef.current) observer.observe(cameraFrameRef.current);
     if (paperSheetRef.current) observer.observe(paperSheetRef.current);
     window.addEventListener('resize', updateCanvasesGeometry);
 
@@ -305,23 +308,27 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
         </header>
       )}
 
-      {/* Physical Drawing Board & Paper Container */}
-      <div className="relative z-20 flex items-center justify-center w-full h-full p-4 md:p-8 max-h-[92vh]">
+      {/* Studio Camera Frame: Intimately frames the drafting board & paper with clean viewport cropping */}
+      <div
+        ref={cameraFrameRef}
+        id="studio-camera-frame"
+        className="relative z-20 flex items-center justify-center w-full max-w-[1240px] h-full max-h-[92vh] overflow-hidden p-4 md:p-6"
+      >
         {/* Wooden Drafting Art Board */}
         <div
           id="drafting-board"
           className="relative flex items-center justify-center p-6 md:p-10 rounded-xl shadow-2xl transition-all duration-300"
           style={{
-            backgroundColor: '#4a3728',
-            backgroundImage: `linear-gradient(135deg, rgba(255, 255, 255, 0.08) 0%, rgba(0, 0, 0, 0.35) 100%)`,
-            boxShadow: '0 25px 65px -12px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.08) inset'
+            backgroundColor: '#3d2c1e',
+            backgroundImage: `linear-gradient(135deg, rgba(255, 255, 255, 0.07) 0%, rgba(0, 0, 0, 0.42) 100%)`,
+            boxShadow: '0 25px 65px -12px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(255, 255, 255, 0.08) inset'
           }}
         >
           {/* Paper Corner Masking Tape accents */}
-          <div className="absolute -top-3 left-4 w-12 h-6 bg-amber-100/70 border border-amber-200/40 rotate-[-12deg] shadow-md z-30 pointer-events-none rounded-[1px] backdrop-blur-[1px]" />
-          <div className="absolute -top-3 right-4 w-12 h-6 bg-amber-100/70 border border-amber-200/40 rotate-[10deg] shadow-md z-30 pointer-events-none rounded-[1px] backdrop-blur-[1px]" />
-          <div className="absolute -bottom-3 left-6 w-12 h-6 bg-amber-100/70 border border-amber-200/40 rotate-[6deg] shadow-md z-30 pointer-events-none rounded-[1px] backdrop-blur-[1px]" />
-          <div className="absolute -bottom-3 right-6 w-12 h-6 bg-amber-100/70 border border-amber-200/40 rotate-[-8deg] shadow-md z-30 pointer-events-none rounded-[1px] backdrop-blur-[1px]" />
+          <div className="absolute -top-3 left-4 w-12 h-6 bg-amber-100/75 border border-amber-200/50 rotate-[-12deg] shadow-md z-30 pointer-events-none rounded-[1px] backdrop-blur-[1px]" />
+          <div className="absolute -top-3 right-4 w-12 h-6 bg-amber-100/75 border border-amber-200/50 rotate-[10deg] shadow-md z-30 pointer-events-none rounded-[1px] backdrop-blur-[1px]" />
+          <div className="absolute -bottom-3 left-6 w-12 h-6 bg-amber-100/75 border border-amber-200/50 rotate-[6deg] shadow-md z-30 pointer-events-none rounded-[1px] backdrop-blur-[1px]" />
+          <div className="absolute -bottom-3 right-6 w-12 h-6 bg-amber-100/75 border border-amber-200/50 rotate-[-8deg] shadow-md z-30 pointer-events-none rounded-[1px] backdrop-blur-[1px]" />
 
           {/* Paper Surface Wrapper with Unclipped Layered Hand Container */}
           <div
@@ -330,14 +337,14 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
             style={{
               aspectRatio: `${drawingData.width} / ${drawingData.height}`,
               maxHeight: isFullscreen ? '94vh' : '78vh',
-              maxWidth: '92vw'
+              maxWidth: '90vw'
             }}
           >
             {/* The Paper Sheet (Graphite Drawing Canvas) */}
             <div
               id="paper-sheet"
               ref={paperSheetRef}
-              className="relative w-full h-full overflow-hidden rounded-[2px] bg-[#fbf8f0] shadow-[0_4px_12px_rgba(0,0,0,0.3),0_18px_48px_rgba(0,0,0,0.55)] ring-1 ring-stone-400/30"
+              className="relative w-full h-full overflow-hidden rounded-[2px] bg-[#fbf7ee] shadow-[0_2px_8px_rgba(0,0,0,0.18),0_14px_36px_rgba(0,0,0,0.45)] ring-1 ring-stone-300/60"
             >
               <canvas
                 ref={paperCanvasRef}
@@ -372,16 +379,16 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
               )}
           </div>
         </div>
-      </div>
 
-      {/* Photographic Hand Sprite Overlay Canvas (Full Viewport Coverage so Forearm Extends Naturally Off-Screen) */}
-      <canvas
-        ref={overlayCanvasRef}
-        id="overlay-canvas"
-        className={`absolute inset-0 w-full h-full pointer-events-none z-30 transition-opacity duration-200 ${
-          showDebugOverlay && !timelineState.isPlaying ? 'opacity-0' : 'opacity-100'
-        }`}
-      />
+        {/* Photographic Hand Sprite Overlay Canvas (Clipped to camera frame so forearm naturally enters from off-screen edge) */}
+        <canvas
+          ref={overlayCanvasRef}
+          id="overlay-canvas"
+          className={`absolute inset-0 w-full h-full pointer-events-none z-30 transition-opacity duration-200 ${
+            showDebugOverlay && !timelineState.isPlaying ? 'opacity-0' : 'opacity-100'
+          }`}
+        />
+      </div>
 
       {/* Floating Interactive Controls (Screen-Recording Ready) */}
       <ControlsOverlay

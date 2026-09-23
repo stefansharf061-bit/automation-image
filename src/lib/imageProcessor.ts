@@ -22,912 +22,697 @@ export async function loadImage(source: string | File): Promise<HTMLImageElement
   });
 }
 
-function dist(p1: { x: number; y: number }, p2: { x: number; y: number }): number {
+interface Point2D {
+  x: number;
+  y: number;
+}
+
+// -------------------------------------------------------------
+// GEOMETRIC & CURVE SMOOTHING UTILITIES
+// -------------------------------------------------------------
+
+function dist(p1: Point2D, p2: Point2D): number {
   return Math.hypot(p1.x - p2.x, p1.y - p2.y);
 }
 
-// Compute normalized tangent vector from stroke endpoint
-function getTangent(pts: StrokePoint[], fromEnd = false, span = 3): { x: number; y: number } {
-  if (pts.length < 2) return { x: 1, y: 0 };
-  const n = pts.length;
-  const pA = fromEnd ? pts[Math.max(0, n - span - 1)] : pts[0];
-  const pB = fromEnd ? pts[n - 1] : pts[Math.min(n - 1, span)];
-  const d = Math.hypot(pB.x - pA.x, pB.y - pA.y);
-  return d === 0 ? { x: 1, y: 0 } : { x: (pB.x - pA.x) / d, y: (pB.y - pA.y) / d };
-}
-
-// Ramer-Douglas-Peucker line simplification
-function rdp(points: StrokePoint[], epsilon: number): StrokePoint[] {
-  if (points.length <= 2) return points;
-
-  let dmax = 0;
+/**
+ * Ramer-Douglas-Peucker line simplification algorithm
+ */
+function rdp(pts: Point2D[], eps: number): Point2D[] {
+  if (pts.length <= 2) return pts;
+  let maxD = 0;
   let index = 0;
-  const start = points[0];
-  const end = points[points.length - 1];
-  const lineLen = dist(start, end);
+  const p1 = pts[0];
+  const p2 = pts[pts.length - 1];
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const lenSq = dx * dx + dy * dy;
 
-  for (let i = 1; i < points.length - 1; i++) {
-    const d =
-      lineLen === 0
-        ? dist(points[i], start)
-        : Math.abs(
-            (end.y - start.y) * points[i].x -
-              (end.x - start.x) * points[i].y +
-              end.x * start.y -
-              end.y * start.x
-          ) / lineLen;
-    if (d > dmax) {
+  for (let i = 1; i < pts.length - 1; i++) {
+    let d = 0;
+    if (lenSq === 0) {
+      d = dist(pts[i], p1);
+    } else {
+      const t = Math.max(0, Math.min(1, ((pts[i].x - p1.x) * dx + (pts[i].y - p1.y) * dy) / lenSq));
+      d = dist(pts[i], { x: p1.x + t * dx, y: p1.y + t * dy });
+    }
+    if (d > maxD) {
+      maxD = d;
       index = i;
-      dmax = d;
     }
   }
 
-  if (dmax > epsilon) {
-    const r1 = rdp(points.slice(0, index + 1), epsilon);
-    const r2 = rdp(points.slice(index), epsilon);
-    return r1.slice(0, r1.length - 1).concat(r2);
+  if (maxD > eps) {
+    const r1 = rdp(pts.slice(0, index + 1), eps);
+    const r2 = rdp(pts.slice(index), eps);
+    return r1.slice(0, -1).concat(r2);
   }
-  return [start, end];
+  return [p1, p2];
 }
 
-// Catmull-Rom smoothing for organic human hand feel
-function smoothPoints(points: StrokePoint[]): StrokePoint[] {
-  if (points.length < 3) return points;
-  const result: StrokePoint[] = [points[0]];
+/**
+ * Catmull-Rom cubic spline interpolation for organic artist stroke fluidness
+ */
+function smoothPoints(pts: Point2D[]): Point2D[] {
+  if (pts.length <= 2) return pts;
+  const res: Point2D[] = [pts[0]];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[Math.min(pts.length - 1, i + 2)];
 
-  for (let i = 0; i < points.length - 1; i++) {
-    const p0 = i > 0 ? points[i - 1] : points[i];
-    const p1 = points[i];
-    const p2 = points[i + 1];
-    const p3 = i < points.length - 2 ? points[i + 2] : p2;
-
-    const segmentDist = dist(p1, p2);
-    const steps = Math.max(1, Math.min(5, Math.floor(segmentDist / 4)));
-
-    for (let s = 1; s <= steps; s++) {
-      const t = s / steps;
+    // Subdivide into 3 micro-segments
+    for (let t = 0.33; t <= 0.67; t += 0.34) {
       const t2 = t * t;
       const t3 = t2 * t;
-
       const x =
         0.5 *
         (2 * p1.x +
           (-p0.x + p2.x) * t +
           (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
           (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
-
       const y =
         0.5 *
         (2 * p1.y +
           (-p0.y + p2.y) * t +
           (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 +
           (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
+      res.push({ x, y });
+    }
+    res.push(p2);
+  }
+  return res;
+}
 
-      const pressure = p1.pressure + (p2.pressure - p1.pressure) * t;
-      result.push({ x, y, pressure });
+/**
+ * Compute total arc length of a sequence of points
+ */
+function computePathLength(pts: StrokePoint[]): number {
+  let len = 0;
+  for (let i = 1; i < pts.length; i++) {
+    len += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+  }
+  return len;
+}
+
+/**
+ * Separable 1D Gaussian blur for image luminance
+ */
+function gaussianBlur(src: Float32Array, w: number, h: number, sigma: number): Float32Array {
+  const dst = new Float32Array(w * h);
+  const tmp = new Float32Array(w * h);
+  const kRadius = Math.ceil(sigma * 2.5);
+  const kernel: number[] = [];
+  let kSum = 0;
+
+  for (let i = -kRadius; i <= kRadius; i++) {
+    const v = Math.exp(-(i * i) / (2 * sigma * sigma));
+    kernel.push(v);
+    kSum += v;
+  }
+  for (let i = 0; i < kernel.length; i++) kernel[i] /= kSum;
+
+  // Horizontal blur pass
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      for (let k = -kRadius; k <= kRadius; k++) {
+        const px = Math.min(w - 1, Math.max(0, x + k));
+        sum += src[row + px] * kernel[k + kRadius];
+      }
+      tmp[row + x] = sum;
     }
   }
 
-  return result;
-}
-
-// Spatial sorting so the artist draws nearby features in logical anatomical sequence
-function spatialSort<T extends { points: StrokePoint[] }>(items: T[]): T[] {
-  if (items.length <= 1) return items;
-  const sorted = [items[0]];
-  const pool = items.slice(1);
-
-  while (pool.length > 0) {
-    const last = sorted[sorted.length - 1].points[sorted[sorted.length - 1].points.length - 1];
-    let bestIdx = 0;
-    let bestDist = Infinity;
-
-    for (let i = 0; i < pool.length; i++) {
-      const d = dist(last, pool[i].points[0]);
-      if (d < bestDist) {
-        bestDist = d;
-        bestIdx = i;
+  // Vertical blur pass
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) {
+      let sum = 0;
+      for (let k = -kRadius; k <= kRadius; k++) {
+        const py = Math.min(h - 1, Math.max(0, y + k));
+        sum += tmp[py * w + x] * kernel[k + kRadius];
       }
-    }
-    sorted.push(pool.splice(bestIdx, 1)[0]);
-  }
-
-  return sorted;
-}
-
-// ============================================================================
-// STROKE CONSOLIDATION LAYER
-// ============================================================================
-// Groups detected raw edge fragments into coherent, continuous artist-like paths.
-// Eliminates micro-fragmentation, bridges low-contrast highlight gaps, and applies
-// curvature-preserving smoothing and pressure modeling.
-// ============================================================================
-
-interface Fragment {
-  points: StrokePoint[];
-  avgMag: number;
-  length: number;
-  active: boolean;
-}
-
-interface ConsolidatedPath {
-  points: StrokePoint[];
-  avgMag: number;
-  length: number;
-}
-
-function consolidateContours(
-  rawFragments: { points: StrokePoint[]; avgMag: number }[],
-  minStrokeLength = 22
-): ConsolidatedPath[] {
-  if (rawFragments.length === 0) return [];
-
-  const pool: Fragment[] = rawFragments.map((f) => {
-    let len = 0;
-    for (let i = 1; i < f.points.length; i++) len += dist(f.points[i - 1], f.points[i]);
-    return { points: [...f.points], avgMag: f.avgMag, length: len, active: true };
-  });
-
-  // 3-tier progressive continuity chaining passes:
-  // Pass 1: High-confidence collinear adjacent connections
-  // Pass 2: Curvature-preserving gap bridging across light highlights / low contrast
-  // Pass 3: Broader proximity and contour continuation
-  const passes = [
-    { maxDist: 20, minCos: 0.6, minGapAlign: 0.45 },
-    { maxDist: 34, minCos: 0.35, minGapAlign: 0.3 },
-    { maxDist: 48, minCos: 0.15, minGapAlign: 0.15 }
-  ];
-
-  for (const pass of passes) {
-    let merged = true;
-    while (merged) {
-      merged = false;
-      // Prioritize extending longer, more established structural lines first
-      pool.sort((a, b) => b.length - a.length);
-
-      for (let i = 0; i < pool.length; i++) {
-        const A = pool[i];
-        if (!A || !A.active) continue;
-
-        const tailA = A.points[A.points.length - 1];
-        const tanA = getTangent(A.points, true, 4);
-
-        let bestJ = -1;
-        let bestScore = -Infinity;
-        let bestReverse = false;
-
-        for (let j = 0; j < pool.length; j++) {
-          if (i === j || !pool[j].active) continue;
-          const B = pool[j];
-
-          // Connection Option 1: A.tail -> B.head
-          const headB = B.points[0];
-          const d1 = dist(tailA, headB);
-          if (d1 <= pass.maxDist) {
-            const tanB = getTangent(B.points, false, 4);
-            const cosTheta = tanA.x * tanB.x + tanA.y * tanB.y;
-            const gapDir = d1 > 0.01 ? { x: (headB.x - tailA.x) / d1, y: (headB.y - tailA.y) / d1 } : tanA;
-            const gapAlign = tanA.x * gapDir.x + tanA.y * gapDir.y;
-
-            if (cosTheta >= pass.minCos && (d1 < 5 || gapAlign >= pass.minGapAlign)) {
-              const score = (pass.maxDist - d1) * 1.5 + (cosTheta + 1) * 15 + gapAlign * 10;
-              if (score > bestScore) {
-                bestScore = score;
-                bestJ = j;
-                bestReverse = false;
-              }
-            }
-          }
-
-          // Connection Option 2: A.tail -> B.tail (reverse B)
-          const tailB = B.points[B.points.length - 1];
-          const d2 = dist(tailA, tailB);
-          if (d2 <= pass.maxDist) {
-            const tanB = getTangent(B.points, true, 4);
-            const cosTheta = tanA.x * -tanB.x + tanA.y * -tanB.y;
-            const gapDir = d2 > 0.01 ? { x: (tailB.x - tailA.x) / d2, y: (tailB.y - tailA.y) / d2 } : tanA;
-            const gapAlign = tanA.x * gapDir.x + tanA.y * gapDir.y;
-
-            if (cosTheta >= pass.minCos && (d2 < 5 || gapAlign >= pass.minGapAlign)) {
-              const score = (pass.maxDist - d2) * 1.5 + (cosTheta + 1) * 15 + gapAlign * 10;
-              if (score > bestScore) {
-                bestScore = score;
-                bestJ = j;
-                bestReverse = true;
-              }
-            }
-          }
-        }
-
-        if (bestJ !== -1) {
-          const B = pool[bestJ];
-          B.active = false;
-          const bPts = bestReverse ? [...B.points].reverse() : B.points;
-
-          // Smooth gap bridging across distance: interpolate gentle transition points
-          const gapDist = dist(tailA, bPts[0]);
-          if (gapDist > 3) {
-            const steps = Math.min(6, Math.max(1, Math.floor(gapDist / 4)));
-            for (let s = 1; s < steps; s++) {
-              const t = s / steps;
-              A.points.push({
-                x: tailA.x + (bPts[0].x - tailA.x) * t,
-                y: tailA.y + (bPts[0].y - tailA.y) * t,
-                pressure: (tailA.pressure + bPts[0].pressure) * 0.5
-              });
-            }
-          }
-
-          A.points.push(...bPts);
-          let newLen = 0;
-          for (let k = 1; k < A.points.length; k++) newLen += dist(A.points[k - 1], A.points[k]);
-          A.length = newLen;
-          A.avgMag = (A.avgMag + B.avgMag) * 0.5;
-
-          merged = true;
-          break; // Re-sort and continue progressive chaining
-        }
-      }
+      dst[y * w + x] = sum;
     }
   }
 
-  // Simplification, curve smoothing, and pressure modulation
-  const smoothed = pool
-    .filter((f) => f.active && f.length >= minStrokeLength)
-    .map((f) => {
-      const simplified = rdp(f.points, 1.4);
-      const curved = smoothPoints(simplified);
-      let len = 0;
-      for (let i = 1; i < curved.length; i++) len += dist(curved[i - 1], curved[i]);
-
-      // Modulate pressure: confident body with gentle start and end tapers
-      for (let i = 0; i < curved.length; i++) {
-        const t = curved.length > 1 ? i / (curved.length - 1) : 0.5;
-        const taper = Math.sin(t * Math.PI);
-        const basePressure = curved[i].pressure;
-        curved[i].pressure = Math.min(1.0, Math.max(0.28, basePressure * (0.65 + taper * 0.35)));
-      }
-
-      return {
-        points: curved,
-        avgMag: f.avgMag,
-        length: len
-      };
-    })
-    .filter((f) => f.length >= minStrokeLength);
-
-  smoothed.sort((a, b) => b.length - a.length);
-  return smoothed;
+  return dst;
 }
 
-// ============================================================================
-// GROUPED SHADING GESTURES
-// ============================================================================
-// Replaces disjoint pixel-level hatching with continuous rhythmic back-and-forth
-// serpentine shading gestures that sweep across connected tonal shadow patches.
-// ============================================================================
+// -------------------------------------------------------------
+// MAIN PORTRAIT SKETCH GENERATION PIPELINE
+// -------------------------------------------------------------
 
-interface ShadingGesture {
-  points: StrokePoint[];
-  darkness: number;
-  length: number;
-}
-
-function generateGroupedShadingGestures(
-  gray: Float32Array,
-  width: number,
-  height: number,
-  offsetX: number,
-  offsetY: number,
-  drawW: number,
-  drawH: number
-): { midtoneGestures: ShadingGesture[]; deepGestures: ShadingGesture[] } {
-  const midtoneGestures: ShadingGesture[] = [];
-  const deepGestures: ShadingGesture[] = [];
-
-  const bandHeight = 36;
-  const strideY = 10; // Vertical spacing between oscillating sweeps
-
-  for (let bY = Math.floor(offsetY); bY < offsetY + drawH; bY += bandHeight) {
-    // Scan horizontal strip for dark/shadow columns
-    const darkColumns: { x: number; lum: number }[] = [];
-    for (let x = Math.floor(offsetX); x < offsetX + drawW; x += 6) {
-      let sumLum = 0;
-      let count = 0;
-      for (let y = bY; y < bY + bandHeight && y < height; y += 4) {
-        sumLum += gray[y * width + x];
-        count++;
-      }
-      const avgLum = sumLum / count;
-      if (avgLum < 145) {
-        darkColumns.push({ x, lum: avgLum });
-      }
-    }
-
-    if (darkColumns.length < 5) continue;
-
-    // Cluster into contiguous shadow patches
-    const clusters: { x: number; lum: number }[][] = [];
-    let currentCluster = [darkColumns[0]];
-
-    for (let i = 1; i < darkColumns.length; i++) {
-      if (darkColumns[i].x - darkColumns[i - 1].x <= 22) {
-        currentCluster.push(darkColumns[i]);
-      } else {
-        if (currentCluster.length >= 5) clusters.push(currentCluster);
-        currentCluster = [darkColumns[i]];
-      }
-    }
-    if (currentCluster.length >= 5) clusters.push(currentCluster);
-
-    // Generate continuous serpentine sweeps for each contiguous tonal patch
-    for (const cluster of clusters) {
-      const minX = cluster[0].x;
-      const maxX = cluster[cluster.length - 1].x;
-      const spanW = maxX - minX;
-      if (spanW < 30) continue;
-
-      const avgLum = cluster.reduce((sum, c) => sum + c.lum, 0) / cluster.length;
-      const darkness = (145 - avgLum) / 145;
-
-      // 1. Midtone Shading Gesture: Continuous multi-pass zigzag with rounded turnaround arcs
-      const gesturePts: StrokePoint[] = [];
-      const numSweeps = Math.max(3, Math.min(6, Math.floor(bandHeight / strideY)));
-      const passStepX = Math.max(8, Math.min(18, spanW / 10));
-
-      let leftToRight = true;
-      for (let s = 0; s < numSweeps; s++) {
-        const sweepY = bY + s * strideY + strideY * 0.5;
-        // Right-handed diagonal slant
-        const slant = (s - numSweeps * 0.5) * 4;
-
-        if (leftToRight) {
-          for (let x = minX; x <= maxX; x += passStepX) {
-            const sampleX = Math.round(x);
-            const sampleY = Math.min(height - 1, Math.max(0, Math.round(sweepY)));
-            const localDarkness = Math.max(0.15, (160 - gray[sampleY * width + sampleX]) / 160);
-            gesturePts.push({
-              x: x + slant,
-              y: sweepY + Math.sin(x * 0.1) * 1.5,
-              pressure: Math.min(0.85, 0.35 + localDarkness * 0.5)
-            });
-          }
-          // Turnaround arc at right boundary
-          if (s < numSweeps - 1) {
-            gesturePts.push({
-              x: maxX + slant + 5,
-              y: sweepY + strideY * 0.5,
-              pressure: 0.32
-            });
-          }
-        } else {
-          for (let x = maxX; x >= minX; x -= passStepX) {
-            const sampleX = Math.round(x);
-            const sampleY = Math.min(height - 1, Math.max(0, Math.round(sweepY)));
-            const localDarkness = Math.max(0.15, (160 - gray[sampleY * width + sampleX]) / 160);
-            gesturePts.push({
-              x: x + slant,
-              y: sweepY - Math.sin(x * 0.1) * 1.5,
-              pressure: Math.min(0.85, 0.35 + localDarkness * 0.5)
-            });
-          }
-          // Turnaround arc at left boundary
-          if (s < numSweeps - 1) {
-            gesturePts.push({
-              x: minX + slant - 5,
-              y: sweepY + strideY * 0.5,
-              pressure: 0.32
-            });
-          }
-        }
-        leftToRight = !leftToRight;
-      }
-
-      if (gesturePts.length >= 6) {
-        const smPts = smoothPoints(gesturePts);
-        let len = 0;
-        for (let i = 1; i < smPts.length; i++) len += dist(smPts[i - 1], smPts[i]);
-        midtoneGestures.push({ points: smPts, darkness, length: len });
-      }
-
-      // 2. Deep Accent & Cross-Hatching Gesture: Opposing angle pass for core dark recesses
-      if (avgLum < 75 && spanW >= 36) {
-        const crossPts: StrokePoint[] = [];
-        const crossSweeps = Math.max(2, Math.min(4, Math.floor(bandHeight / (strideY * 1.3))));
-        let rightToLeft = true;
-
-        for (let cs = 0; cs < crossSweeps; cs++) {
-          const sweepY = bY + cs * (strideY * 1.3) + strideY * 0.6;
-          // Opposing cross-angle slant
-          const crossSlant = -(cs - crossSweeps * 0.5) * 6;
-
-          if (rightToLeft) {
-            for (let x = maxX; x >= minX; x -= passStepX * 1.25) {
-              crossPts.push({
-                x: x + crossSlant,
-                y: sweepY + Math.cos(x * 0.08) * 1.5,
-                pressure: Math.min(0.95, 0.65 + darkness * 0.3)
-              });
-            }
-            if (cs < crossSweeps - 1) {
-              crossPts.push({
-                x: minX + crossSlant - 4,
-                y: sweepY + strideY * 1.3 * 0.5,
-                pressure: 0.5
-              });
-            }
-          } else {
-            for (let x = minX; x <= maxX; x += passStepX * 1.25) {
-              crossPts.push({
-                x: x + crossSlant,
-                y: sweepY - Math.cos(x * 0.08) * 1.5,
-                pressure: Math.min(0.95, 0.65 + darkness * 0.3)
-              });
-            }
-            if (cs < crossSweeps - 1) {
-              crossPts.push({
-                x: maxX + crossSlant + 4,
-                y: sweepY + strideY * 1.3 * 0.5,
-                pressure: 0.5
-              });
-            }
-          }
-          rightToLeft = !rightToLeft;
-        }
-
-        if (crossPts.length >= 6) {
-          const smCross = smoothPoints(crossPts);
-          let cLen = 0;
-          for (let i = 1; i < smCross.length; i++) cLen += dist(smCross[i - 1], smCross[i]);
-          deepGestures.push({
-            points: smCross,
-            darkness: Math.min(1.0, darkness * 1.2),
-            length: cLen
-          });
-        }
-      }
-    }
-  }
-
-  return { midtoneGestures, deepGestures };
-}
-
-// ============================================================================
-// MAIN DRAWING GENERATION PIPELINE
-// ============================================================================
-
-export function processImageToDrawing(
-  image: HTMLImageElement,
+export async function processImageToDrawing(
+  source: string | File,
   style: DrawingStyle = 'pencil',
-  targetWidth = 720,
-  targetHeight = 960
-): DrawingData {
+  targetWidth: number = 720,
+  targetHeight: number = 960
+): Promise<DrawingData> {
+  const img = await loadImage(source);
   const canvas = document.createElement('canvas');
   canvas.width = targetWidth;
   canvas.height = targetHeight;
-  const ctx = canvas.getContext('2d')!;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('Could not get canvas context');
 
-  const marginX = targetWidth * 0.08;
-  const marginY = targetHeight * 0.08;
-  const drawWidth = targetWidth - marginX * 2;
-  const drawHeight = targetHeight - marginY * 2;
-
-  const imgAspect = image.naturalWidth / image.naturalHeight;
-  const boxAspect = drawWidth / drawHeight;
-  let finalW = drawWidth;
-  let finalH = drawHeight;
-  let offsetX = marginX;
-  let offsetY = marginY;
-
-  if (imgAspect > boxAspect) {
-    finalH = drawWidth / imgAspect;
-    offsetY = marginY + (drawHeight - finalH) / 2;
-  } else {
-    finalW = drawHeight * imgAspect;
-    offsetX = marginX + (drawWidth - finalW) / 2;
-  }
-
+  // Draw background white
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, targetWidth, targetHeight);
-  ctx.drawImage(image, offsetX, offsetY, finalW, finalH);
 
+  // Contain resize with centered composition
+  const imgAspect = img.naturalWidth / img.naturalHeight;
+  const targetAspect = targetWidth / targetHeight;
+  let dw = targetWidth;
+  let dh = targetHeight;
+  let dx = 0;
+  let dy = 0;
+
+  if (imgAspect > targetAspect) {
+    dh = targetWidth / imgAspect;
+    dy = (targetHeight - dh) / 2;
+  } else {
+    dw = targetHeight * imgAspect;
+    dx = (targetWidth - dw) / 2;
+  }
+
+  ctx.drawImage(img, dx, dy, dw, dh);
   const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight);
-  const data = imgData.data;
+  const pixels = imgData.data;
 
-  // Grayscale buffer
+  // 1. Grayscale luminance extraction
   const gray = new Float32Array(targetWidth * targetHeight);
-  for (let i = 0; i < data.length; i += 4) {
-    gray[i / 4] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+  for (let i = 0; i < pixels.length; i += 4) {
+    gray[i / 4] = 0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2];
   }
 
-  // Fast 3x3 Gaussian smoothing to eliminate sensor grain
-  const blurred = new Float32Array(targetWidth * targetHeight);
-  for (let y = 1; y < targetHeight - 1; y++) {
-    const row = y * targetWidth;
-    for (let x = 1; x < targetWidth - 1; x++) {
-      const idx = row + x;
-      blurred[idx] =
-        (gray[idx - targetWidth - 1] +
-          gray[idx - targetWidth] * 2 +
-          gray[idx - targetWidth + 1] +
-          gray[idx - 1] * 2 +
-          gray[idx] * 4 +
-          gray[idx + 1] * 2 +
-          gray[idx + targetWidth - 1] +
-          gray[idx + targetWidth] * 2 +
-          gray[idx + targetWidth + 1]) *
-        0.0625;
-    }
-  }
+  // 2. Pre-smoothing: eliminate photographic grain, sensor noise, and micro skin pores
+  // while preserving primary facial contours (eyes, lips, jawline, hair silhouette)
+  const smoothed = gaussianBlur(gray, targetWidth, targetHeight, 1.8);
 
-  // Sobel Edge Detection
-  const gradMag = new Float32Array(targetWidth * targetHeight);
-  const gradDir = new Float32Array(targetWidth * targetHeight);
+  // 3. Sobel gradient magnitude & direction
+  const mag = new Float32Array(targetWidth * targetHeight);
+  const dir = new Float32Array(targetWidth * targetHeight);
 
   for (let y = 1; y < targetHeight - 1; y++) {
     const row = y * targetWidth;
     for (let x = 1; x < targetWidth - 1; x++) {
       const idx = row + x;
       const gx =
-        -1 * blurred[idx - targetWidth - 1] +
-        1 * blurred[idx - targetWidth + 1] +
-        -2 * blurred[idx - 1] +
-        2 * blurred[idx + 1] +
-        -1 * blurred[idx + targetWidth - 1] +
-        1 * blurred[idx + targetWidth + 1];
-
+        -1 * smoothed[idx - targetWidth - 1] +
+        1 * smoothed[idx - targetWidth + 1] +
+        -2 * smoothed[idx - 1] +
+        2 * smoothed[idx + 1] +
+        -1 * smoothed[idx + targetWidth - 1] +
+        1 * smoothed[idx + targetWidth + 1];
       const gy =
-        -1 * blurred[idx - targetWidth - 1] -
-        2 * blurred[idx - targetWidth] -
-        1 * blurred[idx - targetWidth + 1] +
-        1 * blurred[idx + targetWidth - 1] +
-        2 * blurred[idx + targetWidth] +
-        1 * blurred[idx + targetWidth + 1];
+        -1 * smoothed[idx - targetWidth - 1] -
+        2 * smoothed[idx - targetWidth] -
+        1 * smoothed[idx - targetWidth + 1] +
+        1 * smoothed[idx + targetWidth - 1] +
+        2 * smoothed[idx + targetWidth] +
+        1 * smoothed[idx + targetWidth + 1];
 
-      gradMag[idx] = Math.hypot(gx, gy);
-      gradDir[idx] = Math.atan2(gy, gx);
+      mag[idx] = Math.hypot(gx, gy);
+      dir[idx] = Math.atan2(gy, gx);
     }
   }
 
-  // Fast Directional Ridge Tracing
-  const visited = new Uint8Array(targetWidth * targetHeight);
-  const rawContours: { points: StrokePoint[]; avgMag: number }[] = [];
-  const strongThreshold = 36;
-  const weakThreshold = 18;
-
-  for (let y = Math.floor(offsetY); y < offsetY + finalH; y += 3) {
+  // 4. Non-Maximum Suppression (NMS) for crisp 1-pixel ridges
+  const nms = new Float32Array(targetWidth * targetHeight);
+  for (let y = 2; y < targetHeight - 2; y++) {
     const row = y * targetWidth;
-    for (let x = Math.floor(offsetX); x < offsetX + finalW; x += 3) {
+    for (let x = 2; x < targetWidth - 2; x++) {
       const idx = row + x;
-      if (visited[idx] === 0 && gradMag[idx] > strongThreshold) {
-        const points: StrokePoint[] = [];
-        let cx = x;
-        let cy = y;
-        let totalMag = 0;
-        let curAngle = gradDir[idx] + Math.PI * 0.5;
+      const m = mag[idx];
+      if (m < 14) continue;
 
-        while (
-          cx >= 3 &&
-          cx < targetWidth - 3 &&
-          cy >= 3 &&
-          cy < targetHeight - 3 &&
-          points.length < 450
-        ) {
-          const cidx = cy * targetWidth + cx;
-          if (visited[cidx] === 1 || gradMag[cidx] < weakThreshold) break;
+      let angle = dir[idx] * (180 / Math.PI);
+      if (angle < 0) angle += 180;
 
-          visited[cidx] = 1;
-          visited[cidx - 1] = 1;
-          visited[cidx + 1] = 1;
-          visited[cidx - targetWidth] = 1;
-          visited[cidx + targetWidth] = 1;
+      let m1 = 0;
+      let m2 = 0;
+      if ((angle >= 0 && angle < 22.5) || (angle >= 157.5 && angle <= 180)) {
+        m1 = mag[idx - 1];
+        m2 = mag[idx + 1];
+      } else if (angle >= 22.5 && angle < 67.5) {
+        m1 = mag[idx - targetWidth + 1];
+        m2 = mag[idx + targetWidth - 1];
+      } else if (angle >= 67.5 && angle < 112.5) {
+        m1 = mag[idx - targetWidth];
+        m2 = mag[idx + targetWidth];
+      } else {
+        m1 = mag[idx - targetWidth - 1];
+        m2 = mag[idx + targetWidth + 1];
+      }
 
-          totalMag += gradMag[cidx];
-          points.push({
-            x: cx,
-            y: cy,
-            pressure: Math.min(1.0, 0.4 + gradMag[cidx] / 150)
-          });
+      if (m >= m1 && m >= m2) {
+        nms[idx] = m;
+      }
+    }
+  }
 
-          // Forward search along ridge tangent (3 forward sector angles)
-          const forwardAngles = [curAngle, curAngle - 0.45, curAngle + 0.45];
-          let bestX = -1;
-          let bestY = -1;
-          let bestMag = weakThreshold;
-          let bestAngle = curAngle;
+  // 5. Dual-Threshold Hysteresis for clear portrait contours
+  const highThreshold = 26;
+  const lowThreshold = 13;
+  const edgeType = new Uint8Array(targetWidth * targetHeight);
+  for (let i = 0; i < nms.length; i++) {
+    if (nms[i] >= highThreshold) edgeType[i] = 2;
+    else if (nms[i] >= lowThreshold) edgeType[i] = 1;
+  }
 
-          for (const a of forwardAngles) {
-            const stepDist = 3;
-            const nx = Math.round(cx + Math.cos(a) * stepDist);
-            const ny = Math.round(cy + Math.sin(a) * stepDist);
+  const edgeFinal = new Uint8Array(targetWidth * targetHeight);
+  const queue: number[] = [];
+  for (let y = 1; y < targetHeight - 1; y++) {
+    const row = y * targetWidth;
+    for (let x = 1; x < targetWidth - 1; x++) {
+      const idx = row + x;
+      if (edgeType[idx] === 2) {
+        edgeFinal[idx] = 1;
+        queue.push(idx);
+      }
+    }
+  }
+
+  const dxy = [
+    -targetWidth - 1,
+    -targetWidth,
+    -targetWidth + 1,
+    -1,
+    1,
+    targetWidth - 1,
+    targetWidth,
+    targetWidth + 1
+  ];
+  let head = 0;
+  while (head < queue.length) {
+    const curr = queue[head++];
+    for (let d = 0; d < 8; d++) {
+      const n = curr + dxy[d];
+      if (n >= 0 && n < edgeType.length && edgeType[n] === 1 && edgeFinal[n] === 0) {
+        edgeFinal[n] = 1;
+        queue.push(n);
+      }
+    }
+  }
+
+  // 6. Bidirectional ridge tracking starting from dominant seeds
+  const visited = new Uint8Array(targetWidth * targetHeight);
+  const seeds: { idx: number; mag: number }[] = [];
+  for (let i = 0; i < edgeFinal.length; i++) {
+    if (edgeFinal[i] === 1) seeds.push({ idx: i, mag: mag[i] });
+  }
+  seeds.sort((a, b) => b.mag - a.mag);
+
+  const rawChains: Point2D[][] = [];
+  for (const seed of seeds) {
+    if (visited[seed.idx] === 1) continue;
+    const sy = Math.floor(seed.idx / targetWidth);
+    const sx = seed.idx % targetWidth;
+    visited[seed.idx] = 1;
+
+    const track = (startX: number, startY: number): Point2D[] => {
+      const pts: Point2D[] = [];
+      let cx = startX;
+      let cy = startY;
+      while (true) {
+        let bestNx = -1;
+        let bestNy = -1;
+        let bestMag = -1;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (dx === 0 && dy === 0) continue;
+            const nx = cx + dx;
+            const ny = cy + dy;
             if (nx >= 2 && nx < targetWidth - 2 && ny >= 2 && ny < targetHeight - 2) {
               const nidx = ny * targetWidth + nx;
-              if (visited[nidx] === 0 && gradMag[nidx] > bestMag) {
-                bestMag = gradMag[nidx];
-                bestX = nx;
-                bestY = ny;
-                bestAngle = a;
+              if (edgeFinal[nidx] === 1 && visited[nidx] === 0) {
+                if (mag[nidx] > bestMag) {
+                  bestMag = mag[nidx];
+                  bestNx = nx;
+                  bestNy = ny;
+                }
               }
             }
           }
+        }
+        if (bestNx !== -1) {
+          const nidx = bestNy * targetWidth + bestNx;
+          visited[nidx] = 1;
+          cx = bestNx;
+          cy = bestNy;
+          pts.push({ x: cx, y: cy });
+        } else {
+          break;
+        }
+      }
+      return pts;
+    };
 
-          if (bestX !== -1) {
-            cx = bestX;
-            cy = bestY;
-            curAngle = bestAngle;
-          } else {
-            break;
+    const branch1 = track(sx, sy);
+    const branch2 = track(sx, sy);
+    branch2.reverse();
+    const full = branch2.concat([{ x: sx, y: sy }], branch1);
+    if (full.length >= 14) {
+      rawChains.push(full);
+    }
+  }
+
+  // 7. Collinear endpoint consolidation (join broken jawline, eyebrow, lip, and eye segments)
+  const activeChains = rawChains.map((pts, i) => ({ id: i, points: pts, active: true }));
+  let merged = true;
+  while (merged) {
+    merged = false;
+    for (let i = 0; i < activeChains.length; i++) {
+      const A = activeChains[i];
+      if (!A.active) continue;
+      const tailA = A.points[A.points.length - 1];
+      let bestJ = -1;
+      let bestDist = 22;
+      let reverseB = false;
+
+      for (let j = 0; j < activeChains.length; j++) {
+        if (i === j) continue;
+        const B = activeChains[j];
+        if (!B.active) continue;
+
+        const d1 = dist(tailA, B.points[0]);
+        if (d1 < bestDist) {
+          bestDist = d1;
+          bestJ = j;
+          reverseB = false;
+        }
+        const d2 = dist(tailA, B.points[B.points.length - 1]);
+        if (d2 < bestDist) {
+          bestDist = d2;
+          bestJ = j;
+          reverseB = true;
+        }
+      }
+
+      if (bestJ !== -1) {
+        const B = activeChains[bestJ];
+        B.active = false;
+        const bPts = reverseB ? [...B.points].reverse() : B.points;
+        A.points = A.points.concat(bPts);
+        merged = true;
+        break;
+      }
+    }
+  }
+
+  const mergedChains = activeChains
+    .filter((c) => c.active && c.points.length >= 16)
+    .map((c) => c.points);
+
+  // 8. Intentional Form Shading: Identify 3 to 4 major anatomical shadow regions
+  // (e.g. neck/under-chin shadow, eye sockets, hair shadow mass, cheek shadow)
+  const shadowMask = new Uint8Array(targetWidth * targetHeight);
+  const shadowBlur = gaussianBlur(gray, targetWidth, targetHeight, 4.0);
+  for (let i = 0; i < shadowBlur.length; i++) {
+    if (shadowBlur[i] < 95) shadowMask[i] = 1;
+  }
+
+  const shadowVisited = new Uint8Array(targetWidth * targetHeight);
+  interface ShadowRegion {
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+    count: number;
+  }
+  const shadowRegions: ShadowRegion[] = [];
+
+  for (let y = 10; y < targetHeight - 10; y += 4) {
+    for (let x = 10; x < targetWidth - 10; x += 4) {
+      const idx = y * targetWidth + x;
+      if (shadowMask[idx] === 1 && shadowVisited[idx] === 0) {
+        const q = [idx];
+        shadowVisited[idx] = 1;
+        let count = 0;
+        let minX = x;
+        let maxX = x;
+        let minY = y;
+        let maxY = y;
+
+        while (q.length > 0 && count < 5000) {
+          const curr = q.pop()!;
+          count++;
+          const cy = Math.floor(curr / targetWidth);
+          const cx = curr % targetWidth;
+          if (cx < minX) minX = cx;
+          if (cx > maxX) maxX = cx;
+          if (cy < minY) minY = cy;
+          if (cy > maxY) maxY = cy;
+
+          for (const [dx, dy] of [
+            [-4, 0],
+            [4, 0],
+            [0, -4],
+            [0, 4]
+          ]) {
+            const nx = cx + dx;
+            const ny = cy + dy;
+            if (nx >= 0 && nx < targetWidth && ny >= 0 && ny < targetHeight) {
+              const nidx = ny * targetWidth + nx;
+              if (shadowMask[nidx] === 1 && shadowVisited[nidx] === 0) {
+                shadowVisited[nidx] = 1;
+                q.push(nidx);
+              }
+            }
           }
         }
 
-        if (points.length >= 8) {
-          rawContours.push({
-            points,
-            avgMag: totalMag / points.length
-          });
+        if (count >= 400 && maxX - minX > 40 && maxY - minY > 30) {
+          shadowRegions.push({ minX, maxX, minY, maxY, count });
         }
       }
     }
   }
 
-  // ==========================================================================
-  // APPLY STROKE CONSOLIDATION LAYER
-  // ==========================================================================
-  const consolidated = consolidateContours(rawContours, 22);
+  shadowRegions.sort((a, b) => b.count - a.count);
+  const topShadows = shadowRegions.slice(0, 4); // Limit to top 4 major shadow masses only
 
-  // Generate Grouped Shading Gestures
-  const { midtoneGestures, deepGestures } = generateGroupedShadingGestures(
-    gray,
-    targetWidth,
-    targetHeight,
-    offsetX,
-    offsetY,
-    finalW,
-    finalH
-  );
+  // Create 3 to 5 parallel rhythmic artist shading strokes per shadow mass (-35° angle)
+  const intentionalShadingChains: Point2D[][] = [];
+  const hatchAngle = -35 * (Math.PI / 180);
+  const cosH = Math.cos(hatchAngle);
+  const sinH = Math.sin(hatchAngle);
+  const perpX = -sinH;
+  const perpY = cosH;
 
-  // ==========================================================================
-  // PHASE 1: Deliberate Subject-Adaptive Construction Gestures (5 strokes)
-  // Dynamically anchored to the detected subject's actual bounding box and center of mass,
-  // making it completely authentic for portraits, objects, still life, or landscapes.
-  // ==========================================================================
-  let minContourX = Infinity, maxContourX = -Infinity;
-  let minContourY = Infinity, maxContourY = -Infinity;
-  let sumContourX = 0, sumContourY = 0, contourPtsCount = 0;
+  for (const reg of topShadows) {
+    const cx = (reg.minX + reg.maxX) / 2;
+    const cy = (reg.minY + reg.maxY) / 2;
+    const span = Math.max(reg.maxX - reg.minX, reg.maxY - reg.minY);
+    const strokeCount = Math.min(5, Math.max(3, Math.floor(span / 32)));
+    const spacing = 16;
+    const half = (strokeCount - 1) * spacing * 0.5;
 
-  for (const c of consolidated) {
-    for (const p of c.points) {
-      if (p.x < minContourX) minContourX = p.x;
-      if (p.x > maxContourX) maxContourX = p.x;
-      if (p.y < minContourY) minContourY = p.y;
-      if (p.y > maxContourY) maxContourY = p.y;
-      sumContourX += p.x;
-      sumContourY += p.y;
-      contourPtsCount++;
+    for (let s = 0; s < strokeCount; s++) {
+      const offset = -half + s * spacing;
+      const lineCenter = { x: cx + perpX * offset, y: cy + perpY * offset };
+      const halfLen = span * 0.42;
+      const p1 = { x: lineCenter.x - cosH * halfLen, y: lineCenter.y - sinH * halfLen };
+      const p2 = { x: lineCenter.x + cosH * halfLen, y: lineCenter.y + sinH * halfLen };
+
+      const strokePts: Point2D[] = [];
+      for (let step = 0; step <= 8; step++) {
+        const t = step / 8;
+        const px = Math.round(p1.x + (p2.x - p1.x) * t);
+        const py = Math.round(p1.y + (p2.y - p1.y) * t);
+        if (px >= 0 && px < targetWidth && py >= 0 && py < targetHeight) {
+          strokePts.push({ x: px, y: py });
+        }
+      }
+      if (strokePts.length >= 4) {
+        intentionalShadingChains.push(strokePts);
+      }
     }
   }
 
-  if (contourPtsCount === 0) {
-    minContourX = offsetX + finalW * 0.15;
-    maxContourX = offsetX + finalW * 0.85;
-    minContourY = offsetY + finalH * 0.12;
-    maxContourY = offsetY + finalH * 0.88;
-    sumContourX = (minContourX + maxContourX) * 0.5;
-    sumContourY = (minContourY + maxContourY) * 0.5;
-    contourPtsCount = 1;
-  }
-
-  const subjW = Math.max(80, maxContourX - minContourX);
-  const subjH = Math.max(80, maxContourY - minContourY);
-  const subjCx = (minContourX + maxContourX) / 2;
-  const subjCy = (minContourY + maxContourY) / 2;
-
-  const constructionStrokes: { points: StrokePoint[]; length: number }[] = [];
-
-  // 1. Primary Subject Gesture Envelope (bounding silhouette arc)
-  const ovalPoints: StrokePoint[] = [];
-  for (let a = -Math.PI; a <= Math.PI + 0.08; a += Math.PI / 14) {
-    const rx = subjW * 0.52 * (1 + Math.sin(a * 2) * 0.03);
-    const ry = subjH * 0.52 * (1 + Math.cos(a * 2) * 0.03);
-    ovalPoints.push({
-      x: Math.round(subjCx + Math.cos(a) * rx),
-      y: Math.round(subjCy + Math.sin(a) * ry),
-      pressure: 0.38
-    });
-  }
-  const smoothedOval = smoothPoints(ovalPoints);
-  let ovalLen = 0;
-  for (let i = 1; i < smoothedOval.length; i++) ovalLen += dist(smoothedOval[i - 1], smoothedOval[i]);
-  constructionStrokes.push({ points: smoothedOval, length: ovalLen });
-
-  // 2. Central Structural Axis (major vertical symmetry / orientation vector)
-  const vertPts: StrokePoint[] = [
-    { x: Math.round(subjCx), y: Math.round(minContourY - subjH * 0.04), pressure: 0.35 },
-    { x: Math.round(subjCx), y: Math.round(maxContourY + subjH * 0.04), pressure: 0.42 }
-  ];
-  constructionStrokes.push({ points: vertPts, length: dist(vertPts[0], vertPts[1]) });
-
-  // 3. Primary Upper Division Line (e.g. Eyeline in portraits, major upper division in objects)
-  const upperDivY = Math.round(subjCy - subjH * 0.16);
-  const upperPts: StrokePoint[] = [
-    { x: Math.round(subjCx - subjW * 0.44), y: upperDivY - 2, pressure: 0.36 },
-    { x: Math.round(subjCx + subjW * 0.44), y: upperDivY + 2, pressure: 0.40 }
-  ];
-  constructionStrokes.push({ points: upperPts, length: dist(upperPts[0], upperPts[1]) });
-
-  // 4. Secondary Lower Division Line (e.g. Nose base / mouth in portraits, lower shelf in objects)
-  const lowerDivY = Math.round(subjCy + subjH * 0.18);
-  const lowerPts: StrokePoint[] = [
-    { x: Math.round(subjCx - subjW * 0.35), y: lowerDivY, pressure: 0.35 },
-    { x: Math.round(subjCx + subjW * 0.35), y: lowerDivY, pressure: 0.38 }
-  ];
-  constructionStrokes.push({ points: lowerPts, length: dist(lowerPts[0], lowerPts[1]) });
-
-  // 5. Grounding Silhouette / Base Anchor Gesture
-  const baseAnchorY = Math.round(maxContourY + subjH * 0.02);
-  const basePts: StrokePoint[] = [
-    { x: Math.round(subjCx - subjW * 0.45), y: baseAnchorY, pressure: 0.36 },
-    { x: Math.round(subjCx), y: baseAnchorY + 4, pressure: 0.42 },
-    { x: Math.round(subjCx + subjW * 0.45), y: baseAnchorY, pressure: 0.36 }
-  ];
-  const smoothedBase = smoothPoints(basePts);
-  let baseLen = 0;
-  for (let i = 1; i < smoothedBase.length; i++) baseLen += dist(smoothedBase[i - 1], smoothedBase[i]);
-  constructionStrokes.push({ points: smoothedBase, length: baseLen });
-
-  // ==========================================================================
-  // PATH COUNT GOVERNANCE & BUDGETING: ENFORCING 80-180 COHERENT PATHS
-  // ==========================================================================
-  const fixedCount = constructionStrokes.length + 1; // Construction + Artist Signature = 7
-
-  // Shading Gestures Allocation: 24-40 gestures
-  let maxMidtones = Math.min(midtoneGestures.length, 24);
-  let maxDeeps = Math.min(deepGestures.length, 14);
-
-  // If shading gestures are low (e.g. high-key graphic), ensure at least 15 shading gestures if available
-  const totalShading = maxMidtones + maxDeeps;
-
-  // Contour Paths Allocation: target total between 80 and 180 paths
-  // Max contours ceiling = 178 - fixedCount - totalShading
-  const maxContours = Math.max(45, 178 - fixedCount - totalShading);
-  // Min contours floor = Math.max(30, 82 - fixedCount - totalShading)
-  const minContours = Math.max(30, 82 - fixedCount - totalShading);
-
-  let selectedContours = consolidated.slice(0, maxContours);
-  if (selectedContours.length < minContours && consolidated.length > selectedContours.length) {
-    selectedContours = consolidated.slice(0, minContours);
-  }
-
-  // Partition into Phase 2 (Major Outlines: ~35-40%) and Phase 3 (Refined Details: ~60-65%)
-  const numMajor = Math.max(16, Math.min(45, Math.round(selectedContours.length * 0.38)));
-  const majorPaths = selectedContours.slice(0, numMajor);
-  const detailPaths = selectedContours.slice(numMajor);
-
-  // Spatially sequence contour and shading paths for natural hand progression
-  const sortedMajor = spatialSort(majorPaths);
-  const sortedDetails = spatialSort(detailPaths);
-  const sortedMidtones = spatialSort(midtoneGestures.slice(0, maxMidtones));
-  const sortedDeeps = spatialSort(deepGestures.slice(0, maxDeeps));
-
-  // Style configs
-  const styleConfig = {
-    pencil: { color: '#272624', baseWidth: 1.6, alpha: 0.82 },
-    charcoal: { color: '#161514', baseWidth: 2.5, alpha: 0.92 },
-    fineliner: { color: '#0a0a09', baseWidth: 1.25, alpha: 0.95 }
-  }[style];
+  // 9. Process and classify strokes into the 6 authentic drawing phases
+  // Simplify and smooth all contour lines
+  const simplifiedContours = mergedChains.map((c) => smoothPoints(rdp(c, 1.6)));
+  // Sort contours by anatomical importance: outer boundary / length
+  simplifiedContours.sort((a, b) => b.length - a.length);
 
   const strokes: DrawingStroke[] = [];
-  let strokeId = 0;
+  let strokeIdCounter = 0;
 
-  // Phase 1: Construction Marks (0-5s)
-  for (const cs of constructionStrokes) {
+  // Color & alpha setup
+  const baseColor =
+    style === 'pencil' ? '#252220' : style === 'charcoal' ? '#141210' : '#080808';
+
+  // PHASE 1: Primary Structural Anchors & Silhouette (5 to 7 longest foundational strokes)
+  const phase1Count = Math.min(6, Math.max(4, Math.floor(simplifiedContours.length * 0.1)));
+  for (let i = 0; i < phase1Count; i++) {
+    const raw = simplifiedContours[i];
+    const points: StrokePoint[] = raw.map((pt, idx) => ({
+      x: pt.x,
+      y: pt.y,
+      pressure: 0.38 + 0.15 * Math.sin((idx / raw.length) * Math.PI)
+    }));
     strokes.push({
-      id: `stroke-${strokeId++}`,
+      id: `stroke-${strokeIdCounter++}`,
       phase: 1,
-      phaseName: 'Construction Marks',
-      points: cs.points,
-      color: style === 'pencil' ? '#686561' : style === 'charcoal' ? '#4d4a46' : '#55514d',
-      baseWidth: 1.3,
-      alpha: 0.52,
+      phaseName: 'Foundation & Silhouette Anchors',
+      points,
+      color: baseColor,
+      baseWidth: style === 'pencil' ? 1.4 : style === 'charcoal' ? 2.2 : 1.2,
+      alpha: 0.55,
       style,
-      length: cs.length
+      isHatching: false,
+      length: computePathLength(points)
     });
   }
 
-  // Phase 2: Major Structural Outlines (5-20s)
-  for (const c of sortedMajor) {
+  // PHASE 2: Head, Hairline & Outer Contours (Next ~20-25 strokes)
+  const phase2Count = Math.min(
+    22,
+    Math.max(12, Math.floor((simplifiedContours.length - phase1Count) * 0.4))
+  );
+  for (let i = phase1Count; i < phase1Count + phase2Count && i < simplifiedContours.length; i++) {
+    const raw = simplifiedContours[i];
+    const points: StrokePoint[] = raw.map((pt, idx) => ({
+      x: pt.x,
+      y: pt.y,
+      pressure: 0.45 + 0.2 * Math.sin((idx / raw.length) * Math.PI)
+    }));
     strokes.push({
-      id: `stroke-${strokeId++}`,
+      id: `stroke-${strokeIdCounter++}`,
       phase: 2,
-      phaseName: 'Major Outlines',
-      points: c.points,
-      color: styleConfig.color,
-      baseWidth: styleConfig.baseWidth * 1.25,
-      alpha: styleConfig.alpha,
+      phaseName: 'Head Structure & Silhouette Contours',
+      points,
+      color: baseColor,
+      baseWidth: style === 'pencil' ? 1.6 : style === 'charcoal' ? 2.6 : 1.3,
+      alpha: 0.72,
       style,
-      length: c.length
+      isHatching: false,
+      length: computePathLength(points)
     });
   }
 
-  // Phase 3: Features & Secondary Form (20-40s)
-  for (const c of sortedDetails) {
-    strokes.push({
-      id: `stroke-${strokeId++}`,
-      phase: 3,
-      phaseName: 'Features & Form',
-      points: c.points,
-      color: styleConfig.color,
-      baseWidth: styleConfig.baseWidth * 0.95,
-      alpha: styleConfig.alpha * 0.88,
-      style,
-      length: c.length
-    });
-  }
-
-  // Phase 4: Midtone Shading Gestures (40-53s)
-  for (const s of sortedMidtones) {
-    strokes.push({
-      id: `stroke-${strokeId++}`,
-      phase: 4,
-      phaseName: 'Shading & Tones',
-      points: s.points,
-      color: styleConfig.color,
-      baseWidth: styleConfig.baseWidth * (0.8 + s.darkness * 0.45),
-      alpha: styleConfig.alpha * (0.45 + s.darkness * 0.4),
-      style,
-      isHatching: true,
-      length: s.length
-    });
-  }
-
-  // Phase 5: Deep Contrast & Accents (53-58s)
-  for (const s of sortedDeeps) {
-    strokes.push({
-      id: `stroke-${strokeId++}`,
-      phase: 5,
-      phaseName: 'Deep Contrast & Accents',
-      points: s.points,
-      color: styleConfig.color,
-      baseWidth: styleConfig.baseWidth * 1.35,
-      alpha: styleConfig.alpha,
-      style,
-      isHatching: true,
-      length: s.length
-    });
-  }
-
-  // Phase 6: Artist Signature (58-60s)
-  const sigX = offsetX + finalW * 0.82;
-  const sigY = offsetY + finalH * 0.94;
-  const sigPoints: StrokePoint[] = [
-    { x: sigX, y: sigY, pressure: 0.6 },
-    { x: sigX + 10, y: sigY - 6, pressure: 0.85 },
-    { x: sigX + 18, y: sigY + 4, pressure: 0.5 },
-    { x: sigX + 26, y: sigY - 4, pressure: 0.9 },
-    { x: sigX + 36, y: sigY + 6, pressure: 0.45 }
-  ];
-  const smoothedSig = smoothPoints(sigPoints);
-  let sigLen = 0;
-  for (let i = 1; i < smoothedSig.length; i++) sigLen += dist(smoothedSig[i - 1], smoothedSig[i]);
-
-  strokes.push({
-    id: `stroke-${strokeId++}`,
-    phase: 6,
-    phaseName: 'Artist Signature',
-    points: smoothedSig,
-    color: styleConfig.color,
-    baseWidth: styleConfig.baseWidth * 1.15,
-    alpha: styleConfig.alpha * 0.92,
-    style,
-    length: sigLen
+  // PHASE 3: Expressive Facial Features (Eyes, Brows, Nose, Lips, Ears) (Remaining contours)
+  const remainingContours = simplifiedContours.slice(phase1Count + phase2Count);
+  // Sort spatially from eyes (top) down to mouth/chin for natural artist execution
+  remainingContours.sort((a, b) => {
+    const cyA = a.reduce((sum, p) => sum + p.y, 0) / a.length;
+    const cyB = b.reduce((sum, p) => sum + p.y, 0) / b.length;
+    return cyA - cyB;
   });
 
-  // Calculate phase lengths and total length
+  for (const raw of remainingContours) {
+    const points: StrokePoint[] = raw.map((pt, idx) => ({
+      x: pt.x,
+      y: pt.y,
+      pressure: 0.55 + 0.25 * Math.sin((idx / raw.length) * Math.PI)
+    }));
+    strokes.push({
+      id: `stroke-${strokeIdCounter++}`,
+      phase: 3,
+      phaseName: 'Facial Features & Definition',
+      points,
+      color: baseColor,
+      baseWidth: style === 'pencil' ? 1.8 : style === 'charcoal' ? 2.8 : 1.4,
+      alpha: 0.85,
+      style,
+      isHatching: false,
+      length: computePathLength(points)
+    });
+  }
+
+  // PHASE 4: Intentional Form Shading (Clean rhythmic parallel gestures)
+  for (const raw of intentionalShadingChains) {
+    const points: StrokePoint[] = raw.map((pt) => ({
+      x: pt.x,
+      y: pt.y,
+      pressure: 0.42
+    }));
+    strokes.push({
+      id: `stroke-${strokeIdCounter++}`,
+      phase: 4,
+      phaseName: 'Intentional Form Shading',
+      points,
+      color: baseColor,
+      baseWidth: style === 'pencil' ? 1.2 : style === 'charcoal' ? 2.0 : 1.0,
+      alpha: 0.48,
+      style,
+      isHatching: true,
+      length: computePathLength(points)
+    });
+  }
+
+  // PHASE 5: Deep Contrast Accents & Precision Highlights
+  // Select 6-8 sharpest facial accents (deep eye pupil centers, lip parting crease, deep nostrils)
+  const accentCount = Math.min(8, Math.max(4, Math.floor(remainingContours.length * 0.25)));
+  for (let i = 0; i < accentCount; i++) {
+    const srcContour = remainingContours[i % remainingContours.length];
+    if (!srcContour || srcContour.length < 4) continue;
+    // Extract a focused focal segment
+    const startIdx = Math.floor(srcContour.length * 0.25);
+    const endIdx = Math.floor(srcContour.length * 0.75);
+    const accentPts = srcContour.slice(startIdx, endIdx);
+    if (accentPts.length < 3) continue;
+
+    const points: StrokePoint[] = accentPts.map((pt) => ({
+      x: pt.x,
+      y: pt.y,
+      pressure: 0.88
+    }));
+    strokes.push({
+      id: `stroke-${strokeIdCounter++}`,
+      phase: 5,
+      phaseName: 'Deep Contrast & Precision Accents',
+      points,
+      color: baseColor,
+      baseWidth: style === 'pencil' ? 2.2 : style === 'charcoal' ? 3.4 : 1.6,
+      alpha: 0.95,
+      style,
+      isHatching: false,
+      length: computePathLength(points)
+    });
+  }
+
+  // PHASE 6: Artist Signature (Bottom Right Corner)
+  const sigX = targetWidth * 0.76;
+  const sigY = targetHeight * 0.94;
+  const sigPoints: StrokePoint[] = [
+    { x: sigX, y: sigY, pressure: 0.5 },
+    { x: sigX + 14, y: sigY - 7, pressure: 0.65 },
+    { x: sigX + 28, y: sigY + 3, pressure: 0.55 },
+    { x: sigX + 42, y: sigY - 5, pressure: 0.6 },
+    { x: sigX + 54, y: sigY + 2, pressure: 0.45 },
+    { x: sigX + 68, y: sigY - 2, pressure: 0.35 }
+  ];
+  strokes.push({
+    id: `stroke-${strokeIdCounter++}`,
+    phase: 6,
+    phaseName: 'Artist Signature',
+    points: sigPoints,
+    color: baseColor,
+    baseWidth: style === 'pencil' ? 1.5 : 2.0,
+    alpha: 0.75,
+    style,
+    isHatching: false,
+    length: computePathLength(sigPoints)
+  });
+
+  // Calculate metrics
   let totalLength = 0;
   const phaseLengths: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
   for (const s of strokes) {
     totalLength += s.length;
     phaseLengths[s.phase] = (phaseLengths[s.phase] || 0) + s.length;
+  }
+
+  let sourceImageUrl = '';
+  if (typeof source === 'string') {
+    sourceImageUrl = source;
+  } else {
+    sourceImageUrl = URL.createObjectURL(source);
   }
 
   return {
@@ -937,6 +722,6 @@ export function processImageToDrawing(
     strokes,
     totalLength,
     phaseLengths,
-    sourceImageUrl: image.src
+    sourceImageUrl
   };
 }
