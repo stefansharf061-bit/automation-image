@@ -262,7 +262,7 @@ function zhangSuenThinning(bin: Uint8Array, w: number, h: number): Uint8Array {
 }
 
 // -------------------------------------------------------------
-// MASTER PROCESSOR: CLEAN LINE-ART PORTRAIT PIPELINE
+// MASTER PROCESSOR: CLEAN ANATOMICAL LINE-ART PORTRAIT PIPELINE
 // -------------------------------------------------------------
 
 export async function processImageToDrawing(
@@ -308,42 +308,134 @@ export async function processImageToDrawing(
     gray[i / 4] = (0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2]) / 255.0;
   }
 
-  // 2. Multi-Scale Difference of Gaussians (DoG) for Anatomical Line Art
-  // Scale 1 (Fine): isolates facial features (eyes, irises, eyelids, eyebrows, nostril base, lip line)
-  const g1_fine = gaussianBlur(gray, targetWidth, targetHeight, 1.2);
-  const g2_fine = gaussianBlur(gray, targetWidth, targetHeight, 2.8);
+  // 2. High-Fidelity Anatomical Edge Extraction (Canny with Directional NMS & Adaptive Hysteresis)
+  // Fine Gaussian smoothing preserving delicate facial details (pupils, eyelids, nostril crevices, lip seam)
+  const fineSmooth = gaussianBlur(gray, targetWidth, targetHeight, 2.2);
 
-  // Scale 2 (Broad): isolates outer silhouette, hair outline, jawline, ears, neck, shoulders
-  const g1_broad = gaussianBlur(gray, targetWidth, targetHeight, 2.6);
-  const g2_broad = gaussianBlur(gray, targetWidth, targetHeight, 6.2);
+  const gx = new Float32Array(targetWidth * targetHeight);
+  const gy = new Float32Array(targetWidth * targetHeight);
+  const mag = new Float32Array(targetWidth * targetHeight);
 
-  const binary = new Uint8Array(targetWidth * targetHeight);
-  for (let i = 0; i < gray.length; i++) {
-    const dFine = g1_fine[i] - 0.98 * g2_fine[i];
-    const dBroad = g1_broad[i] - 0.97 * g2_broad[i];
+  // Exclude immediate canvas boundary to prevent artificial frame borders
+  const margin = 8;
+  for (let y = margin; y < targetHeight - margin; y++) {
+    const row = y * targetWidth;
+    for (let x = margin; x < targetWidth - margin; x++) {
+      const idx = row + x;
+      const gX =
+        -fineSmooth[(y - 1) * targetWidth + (x - 1)] +
+        fineSmooth[(y - 1) * targetWidth + (x + 1)] +
+        -2 * fineSmooth[row + (x - 1)] +
+        2 * fineSmooth[row + (x + 1)] +
+        -fineSmooth[(y + 1) * targetWidth + (x - 1)] +
+        fineSmooth[(y + 1) * targetWidth + (x + 1)];
 
-    if (dFine < -0.012 || dBroad < -0.018) {
-      binary[i] = 1;
+      const gY =
+        -fineSmooth[(y - 1) * targetWidth + (x - 1)] -
+        2 * fineSmooth[(y - 1) * targetWidth + x] -
+        fineSmooth[(y - 1) * targetWidth + (x + 1)] +
+        fineSmooth[(y + 1) * targetWidth + (x - 1)] +
+        2 * fineSmooth[(y + 1) * targetWidth + x] +
+        fineSmooth[(y + 1) * targetWidth + (x + 1)];
+
+      gx[idx] = gX;
+      gy[idx] = gY;
+      mag[idx] = Math.hypot(gX, gY);
     }
   }
 
-  // 3. Morphological Skeletonization: Reduce lines to strictly 1-pixel centerlines
-  const thinned = zhangSuenThinning(binary, targetWidth, targetHeight);
+  // Non-maximum suppression along gradient orientation
+  const nms = new Float32Array(targetWidth * targetHeight);
+  for (let y = margin; y < targetHeight - margin; y++) {
+    const row = y * targetWidth;
+    for (let x = margin; x < targetWidth - margin; x++) {
+      const idx = row + x;
+      const m = mag[idx];
+      if (m < 0.035) continue; // Noise floor
 
-  // 4. Graph Path Tracing: Trace continuous paths from endpoints first
+      const gX = gx[idx];
+      const gY = gy[idx];
+      let angle = (Math.atan2(gY, gX) * 180) / Math.PI;
+      if (angle < 0) angle += 180;
+
+      let m1 = 0;
+      let m2 = 0;
+      if ((angle >= 0 && angle < 22.5) || (angle >= 157.5 && angle <= 180)) {
+        m1 = mag[idx - 1];
+        m2 = mag[idx + 1];
+      } else if (angle >= 22.5 && angle < 67.5) {
+        m1 = mag[(y - 1) * targetWidth + (x + 1)];
+        m2 = mag[(y + 1) * targetWidth + (x - 1)];
+      } else if (angle >= 67.5 && angle < 112.5) {
+        m1 = mag[(y - 1) * targetWidth + x];
+        m2 = mag[(y + 1) * targetWidth + x];
+      } else {
+        m1 = mag[(y - 1) * targetWidth + (x - 1)];
+        m2 = mag[(y + 1) * targetWidth + (x + 1)];
+      }
+
+      if (m >= m1 && m >= m2) {
+        nms[idx] = m;
+      }
+    }
+  }
+
+  // Hysteresis thresholding for clean, continuous sketch lines
+  const highT = 0.085;
+  const lowT = 0.042;
+  const edges = new Uint8Array(targetWidth * targetHeight);
+
+  for (let y = margin; y < targetHeight - margin; y++) {
+    const row = y * targetWidth;
+    for (let x = margin; x < targetWidth - margin; x++) {
+      const idx = row + x;
+      if (nms[idx] >= highT) {
+        edges[idx] = 1;
+      }
+    }
+  }
+
+  // Connect weak edge neighbors
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let y = margin; y < targetHeight - margin; y++) {
+      const row = y * targetWidth;
+      for (let x = margin; x < targetWidth - margin; x++) {
+        const idx = row + x;
+        if (edges[idx] === 0 && nms[idx] >= lowT) {
+          if (
+            edges[idx - 1] === 1 ||
+            edges[idx + 1] === 1 ||
+            edges[idx - targetWidth] === 1 ||
+            edges[idx + targetWidth] === 1 ||
+            edges[idx - targetWidth - 1] === 1 ||
+            edges[idx - targetWidth + 1] === 1 ||
+            edges[idx + targetWidth - 1] === 1 ||
+            edges[idx + targetWidth + 1] === 1
+          ) {
+            edges[idx] = 1;
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Graph Path Tracing from Endpoints and Junctions
   const visited = new Uint8Array(targetWidth * targetHeight);
   const degree = new Uint8Array(targetWidth * targetHeight);
 
-  for (let y = 1; y < targetHeight - 1; y++) {
+  for (let y = margin; y < targetHeight - margin; y++) {
     const row = y * targetWidth;
-    for (let x = 1; x < targetWidth - 1; x++) {
+    for (let x = margin; x < targetWidth - margin; x++) {
       const idx = row + x;
-      if (thinned[idx] !== 1) continue;
+      if (edges[idx] !== 1) continue;
       let d = 0;
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
           if (dx === 0 && dy === 0) continue;
-          if (thinned[(y + dy) * targetWidth + (x + dx)] === 1) d++;
+          if (edges[(y + dy) * targetWidth + (x + dx)] === 1) d++;
         }
       }
       degree[idx] = d;
@@ -368,9 +460,14 @@ export async function processImageToDrawing(
           if (dx === 0 && dy === 0) continue;
           const px = cx + dx;
           const py = cy + dy;
-          if (px >= 0 && px < targetWidth && py >= 0 && py < targetHeight) {
+          if (
+            px >= margin &&
+            px < targetWidth - margin &&
+            py >= margin &&
+            py < targetHeight - margin
+          ) {
             const nidx = py * targetWidth + px;
-            if (thinned[nidx] === 1 && visited[nidx] === 0) {
+            if (edges[nidx] === 1 && visited[nidx] === 0) {
               nextIdx = nidx;
               nx = px;
               ny = py;
@@ -395,21 +492,21 @@ export async function processImageToDrawing(
 
   const rawPaths: Point2D[][] = [];
   // Trace endpoints first (degree === 1)
-  for (let i = 0; i < thinned.length; i++) {
-    if (thinned[i] === 1 && degree[i] === 1 && visited[i] === 0) {
+  for (let i = 0; i < edges.length; i++) {
+    if (edges[i] === 1 && degree[i] === 1 && visited[i] === 0) {
       const p = tracePath(i);
       if (p.length >= 8) rawPaths.push(p);
     }
   }
-  // Trace any remaining closed contours (loops)
-  for (let i = 0; i < thinned.length; i++) {
-    if (thinned[i] === 1 && visited[i] === 0) {
+  // Trace any remaining closed loops
+  for (let i = 0; i < edges.length; i++) {
+    if (edges[i] === 1 && visited[i] === 0) {
       const p = tracePath(i);
       if (p.length >= 8) rawPaths.push(p);
     }
   }
 
-  // 5. Collinear Segment Stitching: Join nearby endpoints into single fluid artist strokes
+  // 4. Collinear Segment Stitching: Join nearby endpoints into single fluid artist strokes
   const activePaths = rawPaths.map((pts, id) => ({ id, pts, active: true }));
   let joined = true;
   while (joined) {
@@ -419,7 +516,7 @@ export async function processImageToDrawing(
       if (!A.active) continue;
       const tailA = A.pts[A.pts.length - 1];
       let bestJ = -1;
-      let bestDist = 16;
+      let bestDist = 22; // join proximity radius in pixels
       let revB = false;
 
       for (let j = 0; j < activePaths.length; j++) {
@@ -452,17 +549,17 @@ export async function processImageToDrawing(
     }
   }
 
-  // 6. RDP Line Simplification & Catmull-Rom Smoothing
+  // 5. RDP Line Simplification & Catmull-Rom Cubic Spline Smoothing
   let cleanPaths = activePaths
     .filter((a) => a.active)
-    .map((a) => smoothPoints(rdp(a.pts, 1.4)))
-    .filter((a) => pathLength(a) >= 18);
+    .map((a) => smoothPoints(rdp(a.pts, 1.8)))
+    .filter((a) => pathLength(a) >= 28);
 
   // Sort paths by length descending
   cleanPaths.sort((a, b) => pathLength(b) - pathLength(a));
 
-  // Cap to target 30–80 meaningful paths (target ~50–65 paths)
-  cleanPaths = cleanPaths.slice(0, 60);
+  // Cap to target 30–80 meaningful paths (target ~45–60 paths)
+  cleanPaths = cleanPaths.slice(0, 56);
 
   // -------------------------------------------------------------
   // 7. ORCHESTRATE 6-PHASE AUTHENTIC ARTIST TIMELINE
