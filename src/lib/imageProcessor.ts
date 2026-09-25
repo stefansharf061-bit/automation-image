@@ -262,7 +262,9 @@ function zhangSuenThinning(bin: Uint8Array, w: number, h: number): Uint8Array {
 }
 
 // -------------------------------------------------------------
-// MASTER PROCESSOR: CLEAN ANATOMICAL LINE-ART PORTRAIT PIPELINE
+// TWO-STAGE ARCHITECTURE:
+// STAGE 1: PHOTO → CLEAN SUBJECT-FOCUSED PENCIL SKETCH IMAGE
+// STAGE 2: CLEAN SKETCH → ORDERED ARTIST DRAWING PATHS
 // -------------------------------------------------------------
 
 export async function processImageToDrawing(
@@ -302,41 +304,273 @@ export async function processImageToDrawing(
   const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight);
   const pixels = imgData.data;
 
-  // 1. Grayscale luminance extraction (ITU-R BT.601)
-  const gray = new Float32Array(targetWidth * targetHeight);
+  // 1. Grayscale luminance extraction (ITU-R BT.601) & Color representation
+  const N = targetWidth * targetHeight;
+  const gray = new Float32Array(N);
+  const skin = new Uint8Array(N);
+  const r = new Uint8Array(N);
+  const g = new Uint8Array(N);
+  const b = new Uint8Array(N);
+
   for (let i = 0; i < pixels.length; i += 4) {
-    gray[i / 4] = (0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2]) / 255.0;
+    const pIdx = i / 4;
+    const R = pixels[i];
+    const G = pixels[i + 1];
+    const B = pixels[i + 2];
+    r[pIdx] = R;
+    g[pIdx] = G;
+    b[pIdx] = B;
+    gray[pIdx] = (0.299 * R + 0.587 * G + 0.114 * B) / 255.0;
+
+    // YCbCr skin chromaticity detection
+    const cb = 128 - 0.168736 * R - 0.331264 * G + 0.5 * B;
+    const cr = 128 + 0.5 * R - 0.418688 * G - 0.081312 * B;
+    if (cb >= 80 && cb <= 128 && cr >= 133 && cr <= 173 && R > G && G > B && (R - G) >= 10) {
+      skin[pIdx] = 1;
+    }
   }
 
-  // 2. High-Fidelity Anatomical Edge Extraction (Canny with Directional NMS & Adaptive Hysteresis)
-  // Fine Gaussian smoothing preserving delicate facial details (pupils, eyelids, nostril crevices, lip seam)
-  const fineSmooth = gaussianBlur(gray, targetWidth, targetHeight, 2.2);
+  // =============================================================
+  // HUMAN SUBJECT ISOLATION & FOREGROUND SEGMENTATION
+  // =============================================================
+  // Fast 4x downsampled connected-component clustering to isolate heads, faces, baby, arms, and clothing
+  const gridW = 180;
+  const gridH = 240;
+  const downSkin = new Uint8Array(gridW * gridH);
+  const sx = targetWidth / gridW;
+  const sy = targetHeight / gridH;
 
-  const gx = new Float32Array(targetWidth * targetHeight);
-  const gy = new Float32Array(targetWidth * targetHeight);
-  const mag = new Float32Array(targetWidth * targetHeight);
+  for (let dy = 0; dy < gridH; dy++) {
+    for (let dx = 0; dx < gridW; dx++) {
+      const origX = Math.floor(dx * sx);
+      const origY = Math.floor(dy * sy);
+      downSkin[dy * gridW + dx] = skin[origY * targetWidth + origX];
+    }
+  }
 
-  // Exclude immediate canvas boundary to prevent artificial frame borders
+  const visitedDown = new Uint8Array(gridW * gridH);
+  interface SkinCluster {
+    count: number;
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+  }
+  const rawClusters: SkinCluster[] = [];
+
+  for (let y = 0; y < gridH; y++) {
+    for (let x = 0; x < gridW; x++) {
+      const idx = y * gridW + x;
+      if (downSkin[idx] === 1 && !visitedDown[idx]) {
+        const queue = [idx];
+        visitedDown[idx] = 1;
+        let count = 0;
+        let minX = x, maxX = x, minY = y, maxY = y;
+
+        while (queue.length > 0) {
+          const curr = queue.pop()!;
+          count++;
+          const cy = Math.floor(curr / gridW);
+          const cx = curr % gridW;
+          if (cx < minX) minX = cx;
+          if (cx > maxX) maxX = cx;
+          if (cy < minY) minY = cy;
+          if (cy > maxY) maxY = cy;
+
+          const neighbors = [curr - 1, curr + 1, curr - gridW, curr + gridW];
+          for (const nb of neighbors) {
+            if (nb >= 0 && nb < gridW * gridH && downSkin[nb] === 1 && !visitedDown[nb]) {
+              visitedDown[nb] = 1;
+              queue.push(nb);
+            }
+          }
+        }
+
+        if (count >= 15) {
+          rawClusters.push({
+            count,
+            minX: minX * sx,
+            maxX: maxX * sx,
+            minY: minY * sy,
+            maxY: maxY * sy
+          });
+        }
+      }
+    }
+  }
+
+  // Filter to significant human clusters (heads, faces, baby, hands/arms)
+  rawClusters.sort((a, b) => b.count - a.count);
+  const maxClusterCount = rawClusters[0]?.count || 0;
+  const mainClusters = rawClusters.filter((c) => c.count >= Math.max(120, maxClusterCount * 0.15));
+
+  let subjectLeft = 0;
+  let subjectRight = targetWidth - 1;
+  let subjectTop = 0;
+  let subjectBottom = targetHeight - 1;
+  let hasHumanSubjects = false;
+
+  if (mainClusters.length > 0) {
+    hasHumanSubjects = true;
+    let minX = targetWidth, maxX = 0, minY = targetHeight, maxY = 0;
+    for (const c of mainClusters) {
+      if (c.minX < minX) minX = c.minX;
+      if (c.maxX > maxX) maxX = c.maxX;
+      if (c.minY < minY) minY = c.minY;
+      if (c.maxY > maxY) maxY = c.maxY;
+    }
+    // Generously expand for hair above, clothing/bodies below, shoulders laterally
+    const faceSpanY = maxY - minY;
+    subjectTop = Math.max(0, Math.round(minY - faceSpanY * 0.38));
+    subjectBottom = targetHeight - 1;
+    subjectLeft = Math.max(0, Math.round(minX - targetWidth * 0.12));
+    subjectRight = Math.min(targetWidth - 1, Math.round(maxX + targetWidth * 0.12));
+  } else {
+    // Fallback for non-human subjects: focus on central 82% of frame
+    subjectLeft = Math.round(targetWidth * 0.08);
+    subjectRight = Math.round(targetWidth * 0.92);
+    subjectTop = Math.round(targetHeight * 0.08);
+    subjectBottom = Math.round(targetHeight * 0.94);
+  }
+
+  // Build foreground soft mask: zeroes out grass, trees, sky, and distant background edges
+  const fgMask = new Float32Array(N);
+  for (let y = 0; y < targetHeight; y++) {
+    const row = y * targetWidth;
+    for (let x = 0; x < targetWidth; x++) {
+      const idx = row + x;
+      if (y < subjectTop || y > subjectBottom || x < subjectLeft || x > subjectRight) {
+        fgMask[idx] = 0;
+        continue;
+      }
+
+      // Edge feathering
+      const distFromEdgeX = Math.min(x - subjectLeft, subjectRight - x);
+      const distFromEdgeY = y - subjectTop;
+      const vignette = Math.min(1.0, distFromEdgeX / 45.0) * Math.min(1.0, distFromEdgeY / 35.0);
+
+      // Foliage / outdoor green texture suppression
+      const R = r[idx], G = g[idx], B = b[idx];
+      const isGreenFoliage = (G > R * 1.05 && G > B * 1.15 && G > 55);
+
+      if (isGreenFoliage && hasHumanSubjects) {
+        fgMask[idx] = 0.0;
+      } else {
+        fgMask[idx] = vignette;
+      }
+    }
+  }
+
+  const smoothMask = gaussianBlur(fgMask, targetWidth, targetHeight, 4.0);
+
+  // =============================================================
+  // STAGE 1: PRODUCE CLEAN SUBJECT-FOCUSED PENCIL SKETCH IMAGE
+  // =============================================================
+  // 1a. Tonal graphite wash via color-dodge blend
+  const inverted = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    inverted[i] = 1.0 - gray[i];
+  }
+  const blurredInverted = gaussianBlur(inverted, targetWidth, targetHeight, 14.0);
+
+  const tonalPencil = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const base = gray[i];
+    const blend = blurredInverted[i];
+    let v = 1.0;
+    if (blend < 1.0) {
+      v = Math.min(1.0, base / (1.0 - blend + 1e-4));
+    }
+    tonalPencil[i] = Math.pow(v, 1.7);
+  }
+
+  // 1b. Crisp anatomical contours via Difference of Gaussians (DoG)
+  const gFine1 = gaussianBlur(gray, targetWidth, targetHeight, 1.2);
+  const gFine2 = gaussianBlur(gray, targetWidth, targetHeight, 3.2);
+
+  const sketchImgData = ctx.createImageData(targetWidth, targetHeight);
+  const sketchPixels = sketchImgData.data;
+
+  for (let i = 0; i < N; i++) {
+    const maskVal = smoothMask[i];
+    const pIdx = i * 4;
+
+    if (maskVal <= 0.04) {
+      // Pristine paper white background - eliminates all grass, water, sky, tree noise!
+      sketchPixels[pIdx] = 255;
+      sketchPixels[pIdx + 1] = 255;
+      sketchPixels[pIdx + 2] = 255;
+      sketchPixels[pIdx + 3] = 255;
+      continue;
+    }
+
+    const dog = gFine1[i] - 0.97 * gFine2[i];
+    let lineVal = 1.0;
+    if (dog < -0.014) {
+      lineVal = Math.max(0.0, 1.0 + dog * 11.0);
+    }
+
+    const toneVal = tonalPencil[i];
+    const combined = Math.min(lineVal, toneVal);
+
+    // Fade naturally onto clean white paper at subject borders
+    const finalVal = 1.0 - (1.0 - combined) * maskVal;
+    const byteVal = Math.round(Math.min(255, Math.max(0, finalVal * 255)));
+
+    sketchPixels[pIdx] = byteVal;
+    sketchPixels[pIdx + 1] = byteVal;
+    sketchPixels[pIdx + 2] = byteVal;
+    sketchPixels[pIdx + 3] = 255;
+  }
+
+  // Render pristine static sketch to a secondary off-screen canvas to extract data URL
+  const sketchCanvas = document.createElement('canvas');
+  sketchCanvas.width = targetWidth;
+  sketchCanvas.height = targetHeight;
+  const sketchCtx = sketchCanvas.getContext('2d');
+  if (sketchCtx) {
+    sketchCtx.putImageData(sketchImgData, 0, 0);
+  }
+  const staticSketchUrl = sketchCanvas.toDataURL('image/jpeg', 0.92);
+
+  // =============================================================
+  // STAGE 2: EXTRACT ORDERED DRAWING PATHS FROM CLEAN SKETCH
+  // =============================================================
+  // The sketch is now a pristine, clean graphite artwork on paper.
+  // We trace the actual subject sketch marks so the animated pencil draws
+  // the exact visible pencil marks of the subjects!
+  const darkness = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const val = sketchPixels[i * 4] / 255.0;
+    darkness[i] = Math.max(0, 1.0 - val);
+  }
+
+  // Fast 1.2-sigma smoothing on darkness
+  const smoothD = gaussianBlur(darkness, targetWidth, targetHeight, 1.2);
+  const gx = new Float32Array(N);
+  const gy = new Float32Array(N);
+  const mag = new Float32Array(N);
+
   const margin = 8;
   for (let y = margin; y < targetHeight - margin; y++) {
     const row = y * targetWidth;
     for (let x = margin; x < targetWidth - margin; x++) {
       const idx = row + x;
       const gX =
-        -fineSmooth[(y - 1) * targetWidth + (x - 1)] +
-        fineSmooth[(y - 1) * targetWidth + (x + 1)] +
-        -2 * fineSmooth[row + (x - 1)] +
-        2 * fineSmooth[row + (x + 1)] +
-        -fineSmooth[(y + 1) * targetWidth + (x - 1)] +
-        fineSmooth[(y + 1) * targetWidth + (x + 1)];
+        -smoothD[(y - 1) * targetWidth + (x - 1)] +
+        smoothD[(y - 1) * targetWidth + (x + 1)] +
+        -2 * smoothD[row + (x - 1)] +
+        2 * smoothD[row + (x + 1)] +
+        -smoothD[(y + 1) * targetWidth + (x - 1)] +
+        smoothD[(y + 1) * targetWidth + (x + 1)];
 
       const gY =
-        -fineSmooth[(y - 1) * targetWidth + (x - 1)] -
-        2 * fineSmooth[(y - 1) * targetWidth + x] -
-        fineSmooth[(y - 1) * targetWidth + (x + 1)] +
-        fineSmooth[(y + 1) * targetWidth + (x - 1)] +
-        2 * fineSmooth[(y + 1) * targetWidth + x] +
-        fineSmooth[(y + 1) * targetWidth + (x + 1)];
+        -smoothD[(y - 1) * targetWidth + (x - 1)] -
+        2 * smoothD[(y - 1) * targetWidth + x] -
+        smoothD[(y - 1) * targetWidth + (x + 1)] +
+        smoothD[(y + 1) * targetWidth + (x - 1)] +
+        2 * smoothD[(y + 1) * targetWidth + x] +
+        smoothD[(y + 1) * targetWidth + (x + 1)];
 
       gx[idx] = gX;
       gy[idx] = gY;
@@ -344,14 +578,14 @@ export async function processImageToDrawing(
     }
   }
 
-  // Non-maximum suppression along gradient orientation
-  const nms = new Float32Array(targetWidth * targetHeight);
+  // Non-maximum suppression along gradient direction
+  const nms = new Float32Array(N);
   for (let y = margin; y < targetHeight - margin; y++) {
     const row = y * targetWidth;
     for (let x = margin; x < targetWidth - margin; x++) {
       const idx = row + x;
       const m = mag[idx];
-      if (m < 0.035) continue; // Noise floor
+      if (m < 0.08) continue;
 
       const gX = gx[idx];
       const gY = gy[idx];
@@ -380,10 +614,10 @@ export async function processImageToDrawing(
     }
   }
 
-  // Hysteresis thresholding for clean, continuous sketch lines
-  const highT = 0.085;
-  const lowT = 0.042;
-  const edges = new Uint8Array(targetWidth * targetHeight);
+  // Adaptive Hysteresis
+  const highT = 0.16;
+  const lowT = 0.08;
+  const edges = new Uint8Array(N);
 
   for (let y = margin; y < targetHeight - margin; y++) {
     const row = y * targetWidth;
@@ -395,7 +629,6 @@ export async function processImageToDrawing(
     }
   }
 
-  // Connect weak edge neighbors
   let changed = true;
   while (changed) {
     changed = false;
@@ -422,7 +655,7 @@ export async function processImageToDrawing(
     }
   }
 
-  // 3. Graph Path Tracing from Endpoints and Junctions
+  // Graph traversal
   const visited = new Uint8Array(targetWidth * targetHeight);
   const degree = new Uint8Array(targetWidth * targetHeight);
 
@@ -506,17 +739,19 @@ export async function processImageToDrawing(
     }
   }
 
-  // 4. Collinear Segment Stitching: Join nearby endpoints into single fluid artist strokes
+  // Collinear segment stitching: join nearby endpoints into fluid artist strokes
   const activePaths = rawPaths.map((pts, id) => ({ id, pts, active: true }));
   let joined = true;
-  while (joined) {
+  let iter = 0;
+  while (joined && iter < 120) {
     joined = false;
+    iter++;
     for (let i = 0; i < activePaths.length; i++) {
       const A = activePaths[i];
       if (!A.active) continue;
       const tailA = A.pts[A.pts.length - 1];
       let bestJ = -1;
-      let bestDist = 22; // join proximity radius in pixels
+      let bestDist = 20;
       let revB = false;
 
       for (let j = 0; j < activePaths.length; j++) {
@@ -549,17 +784,19 @@ export async function processImageToDrawing(
     }
   }
 
-  // 5. RDP Line Simplification & Catmull-Rom Cubic Spline Smoothing
+  // RDP line simplification & Catmull-Rom cubic spline smoothing
   let cleanPaths = activePaths
     .filter((a) => a.active)
-    .map((a) => smoothPoints(rdp(a.pts, 1.8)))
-    .filter((a) => pathLength(a) >= 28);
+    .map((a) => smoothPoints(rdp(a.pts, 2.0)))
+    .filter((a) => pathLength(a) >= 22);
 
-  // Sort paths by length descending
-  cleanPaths.sort((a, b) => pathLength(b) - pathLength(a));
-
-  // Cap to target 30–80 meaningful paths (target ~45–60 paths)
-  cleanPaths = cleanPaths.slice(0, 56);
+  // Anatomical hierarchy: Heads, hair, facial features, then bodies, baby, arms, clothing
+  cleanPaths.sort((a, b) => {
+    const aMinY = Math.min(...a.map((p) => p.y));
+    const bMinY = Math.min(...b.map((p) => p.y));
+    return aMinY - bMinY;
+  });
+  cleanPaths = cleanPaths.slice(0, 60);
 
   // -------------------------------------------------------------
   // 7. ORCHESTRATE 6-PHASE AUTHENTIC ARTIST TIMELINE
@@ -742,6 +979,7 @@ export async function processImageToDrawing(
     strokes,
     totalLength,
     phaseLengths,
-    sourceImageUrl
+    sourceImageUrl,
+    staticSketchUrl
   };
 }

@@ -5,7 +5,7 @@ import { soundEngine } from '../lib/soundEngine';
 import { ControlsOverlay } from './ControlsOverlay';
 import { RepresentativeHand } from './RepresentativeHand';
 import { DebugPathsOverlay } from './DebugPathsOverlay';
-import { Layers } from 'lucide-react';
+import { Layers, Image as ImageIcon } from 'lucide-react';
 
 interface ArtBoardSceneProps {
   drawingData: DrawingData;
@@ -48,6 +48,7 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
   const [playbackRate, setPlaybackRate] = useState<number>(1.0);
   const [hideControlsInFullscreen, setHideControlsInFullscreen] = useState<boolean>(false);
   const [showDebugOverlay, setShowDebugOverlay] = useState<boolean>(initialDebug);
+  const [showStaticSketch, setShowStaticSketch] = useState<boolean>(false);
   const hideTimerRef = useRef<number | null>(null);
 
   // Update exact screen geometry and coordinate mapping between paper and overlay canvas
@@ -164,6 +165,9 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
       } else if (e.code === 'KeyD') {
         e.preventDefault();
         toggleDebugOverlay();
+      } else if (e.code === 'KeyS') {
+        e.preventDefault();
+        setShowStaticSketch((prev) => !prev);
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -273,6 +277,23 @@ export const ArtBoardScene: React.FC<ArtBoardSceneProps> = ({
           </div>
 
           <div className="flex items-center gap-2.5">
+            {/* Stage 1: Clean Static Sketch Toggle */}
+            {drawingData.staticSketchUrl && (
+              <button
+                id="toggle-static-sketch-btn"
+                onClick={() => setShowStaticSketch((prev) => !prev)}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono rounded border transition-colors cursor-pointer ${
+                  showStaticSketch
+                    ? 'bg-emerald-400 text-stone-950 font-bold border-emerald-300 shadow-md ring-1 ring-emerald-400/40'
+                    : 'bg-stone-900/70 hover:bg-stone-800 border-stone-700/60 text-stone-300'
+                }`}
+                title="View Stage 1 Generated Clean Static Sketch"
+              >
+                <ImageIcon className="w-3.5 h-3.5" />
+                <span>Static Sketch (S)</span>
+              </button>
+            )}
+
             {/* Debug Paths Overlay Toggle */}
             <button
               id="toggle-debug-overlay-btn"

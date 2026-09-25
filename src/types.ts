@@ -28,6 +28,7 @@ export interface DrawingData {
   totalLength: number;
   phaseLengths: Record<number, number>;
   sourceImageUrl: string;
+  staticSketchUrl?: string;
 }
 
 export interface HandMetadata {
